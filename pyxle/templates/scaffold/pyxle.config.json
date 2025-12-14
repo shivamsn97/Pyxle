@@ -1,0 +1,5 @@
+{
+  "middleware": [
+    "middlewares.telemetry:PyxleTelemetryMiddleware"
+  ]
+}

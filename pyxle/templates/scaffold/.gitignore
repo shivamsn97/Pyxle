@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.env
+.venv
+venv/
+ENV/
+
+# Node
+node_modules/
+.pnp/
+.pnp.js
+yarn.lock
+package-lock.json
+
+# Pyxle build artifacts
+.pyxle-build/
+
+# IDEs
+.idea/
+.vscode/
+.DS_Store

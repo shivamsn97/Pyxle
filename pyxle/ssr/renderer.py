@@ -1,0 +1,188 @@
+"""Component rendering helpers for server-side HTML generation."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, Tuple, TypeVar
+
+
+class ComponentRenderError(RuntimeError):
+    """Raised when a component cannot be rendered server-side."""
+
+
+_RenderCallable = Callable[[Dict[str, Any]], Awaitable[str] | str]
+_FactoryReturn = Awaitable[_RenderCallable] | _RenderCallable
+_RenderFactory = Callable[[Path], _FactoryReturn]
+
+_T = TypeVar("_T")
+
+
+def _ensure_awaitable(value: Awaitable[_T] | _T) -> Awaitable[_T]:
+    if asyncio.iscoroutine(value) or isinstance(value, Awaitable):
+        return value  # type: ignore[return-value]
+
+    async def _wrapper() -> _T:
+        return value  # type: ignore[misc]
+
+    return _wrapper()
+
+
+class ComponentRenderer:
+    """Cache-aware wrapper around the internal component rendering runtime."""
+
+    def __init__(self, *, factory: _RenderFactory | None = None) -> None:
+        self._factory: _RenderFactory = factory or _default_factory
+        self._cache: Dict[Path, Tuple[float, _RenderCallable]] = {}
+        self._lock = asyncio.Lock()
+        self._generation = 0
+
+    async def render(self, component_path: Path, props: Dict[str, Any]) -> str:
+        """Render ``component_path`` with the provided props."""
+
+        resolved = component_path.resolve()
+        cached = self._cache.get(resolved)
+
+        if cached is None or cached[0] != self._generation:
+            async with self._lock:
+                cached = self._cache.get(resolved)
+                if cached is None or cached[0] != self._generation:
+                    render_fn = await _ensure_awaitable(self._factory(resolved))
+                    cached = (self._generation, render_fn)
+                    self._cache[resolved] = cached
+
+        _, render_fn = cached
+        result = render_fn(props)
+        return await _ensure_awaitable(result)
+
+    def clear(self) -> None:
+        """Drop all cached component renderers."""
+
+        self._generation += 1
+        self._cache.clear()
+
+
+def _default_factory(component_path: Path) -> _RenderCallable:
+    runtime = _NodeComponentRuntime(component_path)
+
+    async def _render(props: Dict[str, Any]) -> str:
+        return await asyncio.to_thread(runtime.render, props)
+
+    return _render
+
+
+class _NodeComponentRuntime:
+    def __init__(self, component_path: Path) -> None:
+        self._component_path = component_path.resolve()
+        self._client_root, self._project_root = _derive_project_paths(self._component_path)
+        self._node_executable = _resolve_node_executable()
+        self._runtime_script = _resolve_runtime_script()
+
+    def render(self, props: Dict[str, Any]) -> str:
+        try:
+            serialized_props = json.dumps(props, ensure_ascii=False, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ComponentRenderError(
+                f"Unable to serialize props for component '{self._component_path.name}'"
+            ) from exc
+
+        command = [
+            self._node_executable,
+            str(self._runtime_script),
+            str(self._component_path),
+            serialized_props,
+            str(self._client_root),
+            str(self._project_root),
+        ]
+
+        env = os.environ.copy()
+        node_path = str(self._project_root / "node_modules")
+        existing_path = env.get("NODE_PATH")
+        env["NODE_PATH"] = node_path if not existing_path else os.pathsep.join([node_path, existing_path])
+
+        process = subprocess.run(  # noqa: S603 - controlled command invocation
+            command,
+            cwd=str(self._project_root),
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+
+        if process.returncode not in (0, None):
+            raise ComponentRenderError(_format_node_error(process))
+
+        payload = _parse_runtime_output(process.stdout)
+        if not payload.get("ok"):
+            message = payload.get("message") or "SSR runtime reported a failure"
+            raise ComponentRenderError(message)
+
+        html = payload.get("html")
+        if not isinstance(html, str):
+            raise ComponentRenderError("SSR runtime returned malformed HTML payload")
+
+        return html
+
+
+def _parse_runtime_output(raw: str) -> dict[str, Any]:
+    try:
+        payload = (raw or "{}").strip()
+        if not payload:
+            return {}
+        return json.loads(payload)
+    except json.JSONDecodeError as exc:
+        last_brace = payload.rfind("{")
+        if last_brace > 0:
+            snippet = payload[last_brace:]
+            try:
+                return json.loads(snippet)
+            except json.JSONDecodeError:
+                pass
+        raise ComponentRenderError("Unable to parse SSR runtime response") from exc
+
+
+def _format_node_error(process: subprocess.CompletedProcess[str]) -> str:
+    stderr = (process.stderr or "").strip()
+    if stderr:
+        try:
+            payload = json.loads(stderr)
+            message = payload.get("message")
+            if message:
+                return message
+        except json.JSONDecodeError:
+            return stderr
+    return "SSR runtime failed to execute"
+
+
+def _derive_project_paths(component_path: Path) -> Tuple[Path, Path]:
+    for ancestor in component_path.parents:
+        if ancestor.name == "client" and ancestor.parent.name == ".pyxle-build":
+            client_root = ancestor
+            project_root = ancestor.parent.parent
+            return client_root, project_root
+    raise ComponentRenderError(
+        f"Component '{component_path}' is not inside a '.pyxle-build/client' directory"
+    )
+
+
+def _resolve_node_executable() -> str:
+    node_exec = shutil.which("node")
+    if not node_exec:
+        raise ComponentRenderError(
+            "Node.js executable not found. Install Node to enable server-side rendering."
+        )
+    return node_exec
+
+
+def _resolve_runtime_script() -> Path:
+    script_path = Path(__file__).with_name("render_component.mjs")
+    if not script_path.exists():
+        raise ComponentRenderError("SSR runtime script is missing from the installation")
+    return script_path
+
+
+__all__ = ["ComponentRenderError", "ComponentRenderer"]

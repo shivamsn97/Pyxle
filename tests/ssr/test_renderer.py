@@ -1,0 +1,364 @@
+from __future__ import annotations
+
+import asyncio
+import shutil
+from pathlib import Path
+from subprocess import CompletedProcess
+from textwrap import dedent
+
+import pytest
+
+import pyxle.ssr.renderer as renderer_module
+from pyxle.ssr.renderer import (
+    ComponentRenderer,
+    ComponentRenderError,
+    _derive_project_paths,
+    _format_node_error,
+    _parse_runtime_output,
+)
+from tests.ssr.utils import ensure_test_node_modules
+
+
+@pytest.fixture
+def anyio_backend() -> str:  # pragma: no cover - fixture wiring
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_renderer_caches_component(tmp_path: Path) -> None:
+    calls: list[Path] = []
+
+    async def factory(path: Path):
+        calls.append(path)
+
+        async def render(props):
+            return f"rendered:{props['value']}"
+
+        return render
+
+    renderer = ComponentRenderer(factory=factory)
+
+    component = tmp_path / "component.jsx"
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    first = await renderer.render(component, {"value": "a"})
+    second = await renderer.render(component, {"value": "a"})
+
+    assert first == "rendered:a"
+    assert second == "rendered:a"
+    assert calls == [component.resolve()]
+
+
+@pytest.mark.anyio
+async def test_renderer_deduplicates_concurrent_factory_invocations(tmp_path: Path) -> None:
+    component = tmp_path / "race.jsx"
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    factory_calls = 0
+    factory_started = asyncio.Event()
+    allow_finish = asyncio.Event()
+
+    async def factory(path: Path):
+        nonlocal factory_calls
+        factory_calls += 1
+        factory_started.set()
+
+        await allow_finish.wait()
+
+        async def render(props):
+            return "ok"
+
+        return render
+
+    renderer = ComponentRenderer(factory=factory)
+
+    async def invoke():
+        return await renderer.render(component, {})
+
+    first = asyncio.create_task(invoke())
+    await factory_started.wait()
+    second = asyncio.create_task(invoke())
+    await asyncio.sleep(0)
+    allow_finish.set()
+
+    assert await first == "ok"
+    assert await second == "ok"
+    assert factory_calls == 1
+
+
+@pytest.mark.anyio
+async def test_renderer_supports_sync_factory(tmp_path: Path) -> None:
+    component = tmp_path / "view.jsx"
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    def factory(path: Path):
+        def render(props):
+            return f"sync:{props.get('value', '0')}"
+
+        return render
+
+    renderer = ComponentRenderer(factory=factory)
+    result = await renderer.render(component, {"value": "42"})
+    assert result == "sync:42"
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for SSR rendering tests")
+async def test_renderer_default_factory_produces_html(tmp_path: Path) -> None:
+    project_root = tmp_path / "project"
+    component = project_root / ".pyxle-build" / "client" / "pages" / "fallback.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text(
+        dedent(
+            """
+            import React from 'react';
+
+            export default function Fallback({ count }) {
+                return <section data-count={count}>Count: {count}</section>;
+            }
+            """
+        ).strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    ensure_test_node_modules(project_root)
+
+    renderer = ComponentRenderer()
+    result = await renderer.render(component, {"count": 3})
+
+    assert "<section" in result
+    assert "data-count=\"3\"" in result
+    assert "Count:" in result
+    assert "3</section>" in result
+
+
+@pytest.mark.anyio
+async def test_renderer_clear_resets_cache(tmp_path: Path) -> None:
+    calls = 0
+
+    def factory(path: Path):
+        nonlocal calls
+        calls += 1
+
+        def render(props):
+            return "ok"
+
+        return render
+
+    renderer = ComponentRenderer(factory=factory)
+
+    component = tmp_path / "component.jsx"
+
+    await renderer.render(component, {})
+    await renderer.render(component, {})
+    renderer.clear()
+    await renderer.render(component, {})
+
+    assert calls == 2
+    await renderer.render(component, {})
+    assert calls == 2
+
+
+@pytest.mark.anyio
+async def test_renderer_raises_on_unserializable_props(tmp_path: Path) -> None:
+    renderer = ComponentRenderer()
+
+    component = tmp_path / "component.jsx"
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    async def stub_factory(path: Path):
+        raise ComponentRenderError("boom")
+
+    renderer._factory = lambda path: stub_factory(path)  # type: ignore[assignment]
+
+    with pytest.raises(ComponentRenderError):
+        await renderer.render(component, {"value": object()})
+
+
+@pytest.mark.anyio
+async def test_default_factory_invokes_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    component = tmp_path / "project" / ".pyxle-build" / "client" / "pages" / "demo.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+
+    class FakeRuntime:
+        def __init__(self, path: Path) -> None:
+            self.path = path
+
+        def render(self, props: dict[str, object]) -> str:
+            return f"rendered:{props['value']}:{self.path.name}"
+
+    monkeypatch.setattr(renderer_module, "_NodeComponentRuntime", FakeRuntime)
+
+    render_fn = renderer_module._default_factory(component)
+    result = await render_fn({"value": "ok"})
+    assert result == "rendered:ok:demo.jsx"
+
+
+def test_parse_runtime_output_invalid_json() -> None:
+    with pytest.raises(ComponentRenderError):
+        _parse_runtime_output("not-json")
+
+
+def test_parse_runtime_output_with_console_logs() -> None:
+    payload = "console log\n" '{"ok": true, "html": "<div></div>"}'
+    result = _parse_runtime_output(payload)
+    assert result["ok"] is True
+    assert result["html"] == "<div></div>"
+
+
+def test_parse_runtime_output_empty_payload_returns_empty_dict() -> None:
+    assert _parse_runtime_output("   \n") == {}
+
+
+def test_parse_runtime_output_invalid_snippet_raises() -> None:
+    noisy = "log output {\"ok\": false"
+    with pytest.raises(ComponentRenderError):
+        _parse_runtime_output(noisy)
+
+
+def test_format_node_error_prefers_json_message() -> None:
+    process = CompletedProcess(args=["node"], returncode=1, stdout="", stderr='{"message": "boom"}')
+    assert _format_node_error(process) == "boom"
+
+
+def test_format_node_error_handles_json_without_message() -> None:
+    process = CompletedProcess(args=["node"], returncode=1, stdout="", stderr='{"detail": "??"}')
+    assert _format_node_error(process) == "SSR runtime failed to execute"
+
+
+def test_format_node_error_returns_stderr_when_not_json() -> None:
+    process = CompletedProcess(args=["node"], returncode=1, stdout="", stderr="plain failure")
+    assert _format_node_error(process) == "plain failure"
+
+
+def test_format_node_error_returns_default_when_empty() -> None:
+    process = CompletedProcess(args=["node"], returncode=1, stdout="", stderr="")
+    assert _format_node_error(process) == "SSR runtime failed to execute"
+
+
+def test_derive_project_paths_errors_outside_client(tmp_path: Path) -> None:
+    component = tmp_path / "pages" / "index.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    with pytest.raises(ComponentRenderError):
+        _derive_project_paths(component)
+
+
+def test_node_runtime_surfaces_process_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project_root = tmp_path / "project"
+    component = project_root / ".pyxle-build" / "client" / "pages" / "demo.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    monkeypatch.setattr(renderer_module, "_resolve_node_executable", lambda: "node")
+    monkeypatch.setattr(renderer_module, "_resolve_runtime_script", lambda: project_root / "runtime.mjs")
+
+    class DummyProcess:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(renderer_module.subprocess, "run", lambda *args, **kwargs: DummyProcess())
+
+    runtime = renderer_module._NodeComponentRuntime(component)
+
+    with pytest.raises(ComponentRenderError, match="boom"):
+        runtime.render({})
+
+
+def test_node_runtime_serialization_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    component = tmp_path / "project" / ".pyxle-build" / "client" / "pages" / "serialize.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    monkeypatch.setattr(renderer_module, "_resolve_node_executable", lambda: "node")
+    monkeypatch.setattr(renderer_module, "_resolve_runtime_script", lambda: component)
+
+    runtime = renderer_module._NodeComponentRuntime(component)
+
+    with pytest.raises(ComponentRenderError, match="Unable to serialize props"):
+        runtime.render({"value": object()})
+
+
+def test_node_runtime_success_returns_html(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    component = tmp_path / "project" / ".pyxle-build" / "client" / "pages" / "success.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    monkeypatch.setattr(renderer_module, "_resolve_node_executable", lambda: "node")
+    monkeypatch.setattr(renderer_module, "_resolve_runtime_script", lambda: component)
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"ok": true, "html": "<section>ok</section>"}'
+        stderr = ""
+
+    monkeypatch.setattr(renderer_module.subprocess, "run", lambda *args, **kwargs: DummyProcess())
+
+    runtime = renderer_module._NodeComponentRuntime(component)
+    assert runtime.render({}) == "<section>ok</section>"
+
+
+def test_node_runtime_payload_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    component = tmp_path / "project" / ".pyxle-build" / "client" / "pages" / "payload.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    monkeypatch.setattr(renderer_module, "_resolve_node_executable", lambda: "node")
+    monkeypatch.setattr(renderer_module, "_resolve_runtime_script", lambda: component)
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"ok": false, "message": "bad"}'
+        stderr = ""
+
+    monkeypatch.setattr(renderer_module.subprocess, "run", lambda *args, **kwargs: DummyProcess())
+
+    runtime = renderer_module._NodeComponentRuntime(component)
+
+    with pytest.raises(ComponentRenderError, match="bad"):
+        runtime.render({})
+
+
+def test_resolve_node_executable_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(renderer_module.shutil, "which", lambda _: None)
+
+    with pytest.raises(ComponentRenderError):
+        renderer_module._resolve_node_executable()
+
+
+def test_resolve_runtime_script_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_exists = renderer_module.Path.exists
+
+    def fake_exists(self: Path) -> bool:  # type: ignore[override]
+        if self.name == "render_component.mjs":
+            return False
+        return original_exists(self)
+
+    monkeypatch.setattr(renderer_module.Path, "exists", fake_exists, raising=True)
+
+    with pytest.raises(ComponentRenderError):
+        renderer_module._resolve_runtime_script()
+
+
+def test_node_runtime_rejects_non_string_html(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    component = tmp_path / "project" / ".pyxle-build" / "client" / "pages" / "nonstring.jsx"
+    component.parent.mkdir(parents=True, exist_ok=True)
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    monkeypatch.setattr(renderer_module, "_resolve_node_executable", lambda: "node")
+    monkeypatch.setattr(renderer_module, "_resolve_runtime_script", lambda: component)
+
+    class DummyProcess:
+        returncode = 0
+        stdout = '{"ok": true, "html": 42}'
+        stderr = ""
+
+    monkeypatch.setattr(renderer_module.subprocess, "run", lambda *args, **kwargs: DummyProcess())
+
+    runtime = renderer_module._NodeComponentRuntime(component)
+
+    with pytest.raises(ComponentRenderError):
+        runtime.render({})

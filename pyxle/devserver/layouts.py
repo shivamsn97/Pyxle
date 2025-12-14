@@ -1,0 +1,284 @@
+"""Utilities for composing nested layout/template wrappers."""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable, List, Sequence
+
+from .settings import DevServerSettings
+
+
+@dataclass(frozen=True)
+class WrapperSpec:
+    kind: str  # "layout" or "template"
+    client_path: Path
+    relative_path: Path
+
+
+_LAYOUT_FILENAMES = {
+    "layout": "layout",
+    "template": "template",
+}
+
+
+def compose_layout_templates(settings: DevServerSettings) -> None:
+    """Generate composed client modules for pages with layouts/templates."""
+
+    metadata_dir = settings.metadata_build_dir / "pages"
+    if not metadata_dir.exists():
+        return
+
+    for metadata_path, page_relative in _iter_page_metadata(metadata_dir):
+        wrappers = _discover_wrappers(page_relative.parent, settings)
+        _apply_wrappers(metadata_path, page_relative, wrappers, settings)
+
+
+def _iter_page_metadata(metadata_dir: Path) -> Iterable[tuple[Path, Path]]:
+    for metadata_path in sorted(metadata_dir.rglob("*.json")):
+        relative_page = metadata_path.relative_to(metadata_dir).with_suffix(".pyx")
+        name = relative_page.name.lower()
+        if name in {"layout.pyx", "template.pyx"}:
+            continue
+        yield metadata_path, relative_page
+
+
+def _discover_wrappers(relative_dir: Path, settings: DevServerSettings) -> List[WrapperSpec]:
+    client_pages_root = settings.client_build_dir / "pages"
+    ancestors = _ancestor_dirs(relative_dir)
+    wrappers: List[WrapperSpec] = []
+
+    for ancestor in ancestors:
+        for kind, base_name in _LAYOUT_FILENAMES.items():
+            candidate = _client_component_path(client_pages_root, ancestor, base_name)
+            if candidate.exists():
+                try:
+                    relative = candidate.relative_to(client_pages_root)
+                except ValueError:
+                    relative = candidate.name
+                wrappers.append(WrapperSpec(kind=kind, client_path=candidate, relative_path=Path(relative)))
+
+    return wrappers
+
+
+def _apply_wrappers(
+    metadata_path: Path,
+    page_relative: Path,
+    wrappers: Sequence[WrapperSpec],
+    settings: DevServerSettings,
+) -> None:
+    routes_root = settings.client_build_dir / "routes"
+    page_rel_with_suffix = page_relative.with_suffix(".jsx")
+    base_client_path = f"/pages/{page_rel_with_suffix.as_posix()}"
+    composed_client_path = f"/routes/{page_rel_with_suffix.as_posix()}"
+
+    composed_path = routes_root / page_rel_with_suffix
+
+    if not wrappers:
+        _update_metadata(metadata_path, base_client_path, None)
+        _remove_composed_module(composed_path, routes_root)
+        return
+
+    _write_composed_module(
+        output_path=composed_path,
+        page_relative=page_relative,
+        wrappers=wrappers,
+        settings=settings,
+    )
+    _update_metadata(metadata_path, composed_client_path, wrappers)
+
+
+def _write_composed_module(
+    output_path: Path,
+    page_relative: Path,
+    wrappers: Sequence[WrapperSpec],
+    settings: DevServerSettings,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    client_pages_root = settings.client_build_dir / "pages"
+    page_target = client_pages_root / page_relative.with_suffix(".jsx")
+
+    imports: List[str] = [
+        "import React from 'react';",
+        "import { SlotProvider, normalizeSlots, mergeSlotLayers } from 'pyxle/client/slot.jsx';",
+        f"import * as PageModule from '{_relative_import(output_path, page_target)}';",
+    ]
+
+    statements: List[str] = [
+        "const PageComponent = typeof PageModule?.default === 'function'",
+        "  ? PageModule.default",
+        "  : function PyxlePageFallback() {",
+        "      return null;",
+        "    };",
+        "const PAGE_STATIC_SLOTS = normalizeSlots(PageModule?.slots);",
+        "const PAGE_SLOT_FACTORY = typeof PageModule?.createSlots === 'function'",
+        "  ? PageModule.createSlots",
+        "  : null;",
+        "function resolvePageSlots(props) {",
+        "  if (PAGE_SLOT_FACTORY) {",
+        "    return normalizeSlots(PAGE_SLOT_FACTORY(props));",
+        "  }",
+        "  return PAGE_STATIC_SLOTS;",
+        "}",
+    ]
+
+    wrapper_entries: List[str] = []
+    for index, wrapper in enumerate(wrappers):
+        module_alias = f"WrapperModule{index}"
+        component_alias = f"WrapperComponent{index}"
+        static_slots_alias = f"WrapperStaticSlots{index}"
+        slots_factory_alias = f"WrapperSlotsFactory{index}"
+        resolver_name = f"resolveWrapperSlots{index}"
+
+        imports.append(f"import * as {module_alias} from '{_relative_import(output_path, wrapper.client_path)}';")
+        statements.extend(
+            [
+                f"const {component_alias} = typeof {module_alias}?.default === 'function'",
+                f"  ? {module_alias}.default",
+                "  : function PyxleAnonymousLayout(props) {",
+                "      return React.createElement(React.Fragment, null, props?.children ?? null);",
+                "    };",
+                f"const {static_slots_alias} = normalizeSlots({module_alias}?.slots);",
+                f"const {slots_factory_alias} = typeof {module_alias}?.createSlots === 'function'",
+                f"  ? {module_alias}.createSlots",
+                "  : null;",
+                f"function {resolver_name}(props) {{",
+                f"  if ({slots_factory_alias}) {{",
+                f"    return normalizeSlots({slots_factory_alias}(props));",
+                "  }",
+                f"  return {static_slots_alias};",
+                "}",
+            ]
+        )
+        wrapper_entries.append(
+            "  {"
+            + f" kind: '{wrapper.kind}',"
+            + f" component: {component_alias},"
+            + f" resolveSlots: {resolver_name},"
+            + (" reset: true," if wrapper.kind == "template" else " reset: false,")
+            + " },"
+        )
+
+    wrappers_literal = ["const WRAPPERS = ["] + wrapper_entries + ["];"] if wrapper_entries else ["const WRAPPERS = [];"]
+
+    statements.extend(
+        wrappers_literal
+        + [
+            "function buildWrapperLayers(props) {",
+            "  if (!WRAPPERS.length) {",
+            "    return [];",
+            "  }",
+            "  return WRAPPERS.map((wrapper) => ({",
+            "    kind: wrapper.kind,",
+            "    reset: wrapper.reset,",
+            "    slots: wrapper.resolveSlots(props),",
+            "  }));",
+            "}",
+            "export default function PyxleWrappedPage(props) {",
+            "  const wrapperLayers = buildWrapperLayers(props);",
+            "  const mergedSlots = mergeSlotLayers(wrapperLayers, resolvePageSlots(props));",
+            "  let tree = React.createElement(PageComponent, { ...props, slots: mergedSlots });",
+            "  for (let i = WRAPPERS.length - 1; i >= 0; i -= 1) {",
+            "    const wrapper = WRAPPERS[i];",
+            "    tree = React.createElement(wrapper.component, { ...props, slots: mergedSlots }, tree);",
+            "  }",
+            "  return React.createElement(SlotProvider, { slots: mergedSlots }, tree);",
+            "}",
+            f"export * from '{_relative_import(output_path, page_target)}';",
+        ]
+    )
+
+    content = "\n".join([*imports, "", *statements, ""])
+    if output_path.exists() and output_path.read_text(encoding="utf-8") == content:
+        return
+    output_path.write_text(content, encoding="utf-8")
+
+
+def _update_metadata(
+    metadata_path: Path,
+    client_path: str,
+    wrappers: Sequence[WrapperSpec] | None,
+) -> None:
+    try:
+        with metadata_path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):  # pragma: no cover - defensive guard
+        return
+
+    changed = False
+    if payload.get("client_path") != client_path:
+        payload["client_path"] = client_path
+        changed = True
+
+    if wrappers:
+        serialized = [
+            {
+                "kind": wrapper.kind,
+                "client_path": f"/pages/{wrapper.relative_path.as_posix()}",
+            }
+            for wrapper in wrappers
+        ]
+        if payload.get("wrappers") != serialized:
+            payload["wrappers"] = serialized
+            changed = True
+    elif "wrappers" in payload:
+        payload.pop("wrappers", None)
+        changed = True
+
+    if not changed:
+        return
+
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _remove_composed_module(path: Path, routes_root: Path) -> None:
+    if not path.exists():
+        return
+    path.unlink()
+    _prune_empty_parents(path.parent, stop_at=routes_root)
+
+
+def _prune_empty_parents(path: Path, *, stop_at: Path) -> None:
+    current = path
+    stop_at = stop_at.resolve()
+    while True:
+        if not current.exists() or not current.is_dir():
+            break
+        if any(current.iterdir()):
+            break
+        if current.resolve() == stop_at:
+            break
+        current.rmdir()
+        current = current.parent
+
+
+def _client_component_path(root: Path, ancestor: Path, base_name: str) -> Path:
+    if ancestor == Path('.'):
+        relative = Path(f"{base_name}.jsx")
+    else:
+        relative = ancestor / f"{base_name}.jsx"
+    return root / relative
+
+
+def _relative_import(from_file: Path, to_file: Path) -> str:
+    rel = os.path.relpath(to_file, start=from_file.parent)
+    if not rel.startswith('.'):
+        rel = f"./{rel}"
+    return Path(rel).as_posix()
+
+
+def _ancestor_dirs(relative_dir: Path) -> List[Path]:
+    parts = list(relative_dir.parts)
+    ancestors: List[Path] = [Path('.')]
+    for index in range(1, len(parts) + 1):
+        ancestors.append(Path(*parts[:index]))
+    return ancestors
+
+
+__all__ = ["compose_layout_templates"]
