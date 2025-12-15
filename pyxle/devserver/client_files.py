@@ -331,8 +331,10 @@ def _render_vite_config(settings: DevServerSettings) -> str:
             const clientRoot = __dirname;
             const projectRoot = path.resolve(clientRoot, '..', '..');
             const pyxleClientDir = path.resolve(clientRoot, 'pyxle');
+            const base = process.env.PYXLE_VITE_BASE ?? '/';
 
             export default defineConfig({{
+              base,
               root: clientRoot,
               publicDir: path.resolve(projectRoot, 'public'),
               plugins: [react()],
@@ -570,8 +572,7 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               ...import.meta.glob('/pages/**/*.jsx'),
               ...import.meta.glob('/routes/**/*.jsx'),
             };
-            const OVERLAY_CONTAINER_ID = '__PYXLE_ERROR_OVERLAY__';
-            const OVERLAY_RECONNECT_DELAY = 1000;
+            __PYXLE_OVERLAY_BLOCK__
             const NAVIGATION_HEADER = 'x-pyxle-navigation';
             const HEAD_START_SELECTOR = 'meta[data-pyxle-head-start]';
             const HEAD_END_SELECTOR = 'meta[data-pyxle-head-end]';
@@ -598,238 +599,6 @@ def _render_client_entry(settings: DevServerSettings) -> str:
             const availableModules = Object.keys(componentModules);
             if (!currentPagePath && availableModules.length > 0) {
               currentPagePath = availableModules[0];
-            }
-
-            function ensureOverlayRoot() {
-              let container = document.getElementById(OVERLAY_CONTAINER_ID);
-              if (!container) {
-                container = document.createElement('div');
-                container.id = OVERLAY_CONTAINER_ID;
-                document.body.appendChild(container);
-              }
-              if (!container.__pyxle_overlay_root) {
-                container.__pyxle_overlay_root = ReactDOM.createRoot(container);
-              }
-              return container.__pyxle_overlay_root;
-            }
-
-            function renderOverlay(event) {
-              const root = ensureOverlayRoot();
-              const stackLines = (event.stack ?? '').split('\\n').filter(Boolean);
-              const breadcrumbs = Array.isArray(event.breadcrumbs) ? event.breadcrumbs : [];
-              root.render(
-                React.createElement(
-                  () => (
-                    React.createElement(
-                      'div',
-                      {
-                        style: {
-                          position: 'fixed',
-                          inset: 0,
-                          backgroundColor: 'rgba(15, 23, 42, 0.92)',
-                          color: '#f8fafc',
-                          fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-                          padding: '2rem',
-                          overflowY: 'auto',
-                          zIndex: 2147483647,
-                        },
-                      },
-                      [
-                        React.createElement(
-                          'div',
-                          { key: 'header', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' } },
-                          [
-                            React.createElement(
-                              'div',
-                              { key: 'title', style: { fontSize: '1.5rem', fontWeight: 700 } },
-                              `⚠️ Loader/render error in ${event.routePath}`,
-                            ),
-                            React.createElement(
-                              'div',
-                              { key: 'actions', style: { display: 'flex', gap: '0.5rem' } },
-                              [
-                                React.createElement(
-                                  'button',
-                                  {
-                                    key: 'retry',
-                                    style: {
-                                      backgroundColor: '#22c55e',
-                                      color: '#0f172a',
-                                      padding: '0.5rem 0.9rem',
-                                      borderRadius: '0.5rem',
-                                      fontWeight: 600,
-                                      border: 'none',
-                                      cursor: 'pointer',
-                                    },
-                                    onClick: () => window.location.reload(),
-                                  },
-                                  'Retry',
-                                ),
-                                React.createElement(
-                                  'button',
-                                  {
-                                    key: 'dismiss',
-                                    style: {
-                                      backgroundColor: 'transparent',
-                                      color: '#f8fafc',
-                                      padding: '0.5rem 0.9rem',
-                                      borderRadius: '0.5rem',
-                                      fontWeight: 600,
-                                      border: '1px solid rgba(148, 163, 184, 0.6)',
-                                      cursor: 'pointer',
-                                    },
-                                    onClick: clearOverlay,
-                                  },
-                                  'Dismiss',
-                                ),
-                              ],
-                            ),
-                          ],
-                        ),
-                        React.createElement(
-                          'div',
-                          { key: 'message', style: { marginBottom: '1rem', fontSize: '1.1rem' } },
-                          event.message,
-                        ),
-                        breadcrumbs.length
-                          ? React.createElement(
-                              'div',
-                              {
-                                key: 'breadcrumbs',
-                                style: {
-                                  display: 'flex',
-                                  flexDirection: 'column',
-                                  gap: '0.75rem',
-                                  marginBottom: '1rem',
-                                },
-                              },
-                              breadcrumbs.map((crumb, index) =>
-                                React.createElement(
-                                  'div',
-                                  {
-                                    key: `crumb-${index}`,
-                                    style: {
-                                      padding: '0.9rem 1rem',
-                                      borderRadius: '0.75rem',
-                                      backgroundColor: 'rgba(148, 163, 184, 0.08)',
-                                      border: '1px solid rgba(148, 163, 184, 0.2)',
-                                      display: 'flex',
-                                      flexDirection: 'column',
-                                      gap: '0.35rem',
-                                    },
-                                  },
-                                  [
-                                    React.createElement(
-                                      'div',
-                                      {
-                                        key: 'crumb-header',
-                                        style: {
-                                          display: 'flex',
-                                          justifyContent: 'space-between',
-                                          alignItems: 'center',
-                                          fontWeight: 600,
-                                        },
-                                      },
-                                      [
-                                        React.createElement('span', { key: 'label' }, crumb.label ?? `Stage ${index + 1}`),
-                                        React.createElement(
-                                          'span',
-                                          {
-                                            key: 'status',
-                                            style: {
-                                              textTransform: 'uppercase',
-                                              fontSize: '0.75rem',
-                                              letterSpacing: '0.08em',
-                                              padding: '0.1rem 0.5rem',
-                                              borderRadius: '999px',
-                                              border: '1px solid rgba(148, 163, 184, 0.6)',
-                                            },
-                                          },
-                                          String(crumb.status ?? 'unknown').toUpperCase(),
-                                        ),
-                                      ],
-                                    ),
-                                    crumb.detail
-                                      ? React.createElement(
-                                          'p',
-                                          {
-                                            key: 'detail',
-                                            style: {
-                                              margin: 0,
-                                              color: 'rgba(226, 232, 240, 0.85)',
-                                              fontSize: '0.9rem',
-                                            },
-                                          },
-                                          crumb.detail,
-                                        )
-                                      : null,
-                                  ],
-                                ),
-                              ),
-                            )
-                          : null,
-                        React.createElement(
-                          'pre',
-                          {
-                            key: 'stack',
-                            style: {
-                              backgroundColor: 'rgba(15, 23, 42, 0.6)',
-                              borderRadius: '0.75rem',
-                              padding: '1rem',
-                              fontSize: '0.85rem',
-                              lineHeight: 1.5,
-                              whiteSpace: 'pre-wrap',
-                            },
-                          },
-                          stackLines.join('\\n'),
-                        ),
-                      ],
-                    )
-                  ),
-                ),
-              );
-            }
-
-            function clearOverlay() {
-              const container = document.getElementById(OVERLAY_CONTAINER_ID);
-              if (!container || !container.__pyxle_overlay_root) {
-                return;
-              }
-              container.__pyxle_overlay_root.render(null);
-            }
-
-            function connectOverlayChannel() {
-              const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-              const url = `${protocol}//${window.location.host}/__pyxle__/overlay`;
-              const socket = new WebSocket(url);
-
-              socket.onmessage = (event) => {
-                try {
-                  const payload = JSON.parse(event.data);
-                  if (payload.type === 'error') {
-                    renderOverlay(payload.payload ?? {});
-                  } else if (payload.type === 'clear') {
-                    clearOverlay();
-                  } else if (payload.type === 'reload') {
-                    const changed = Array.isArray(payload.payload?.changedPaths)
-                      ? payload.payload.changedPaths
-                      : [];
-                    const reason = changed.length ? changed.join(', ') : 'server changes';
-                    console.info(`[Pyxle] Reloading due to ${reason}`);
-                    window.location.reload();
-                  }
-                } catch (error) {
-                  console.error('[Pyxle] Failed to parse overlay message', error);
-                }
-              };
-
-              socket.onclose = () => {
-                setTimeout(connectOverlayChannel, OVERLAY_RECONNECT_DELAY);
-              };
-
-              socket.onerror = () => {
-                socket.close();
-              };
             }
 
             function parseInitialProps() {
@@ -1369,7 +1138,7 @@ def _render_client_entry(settings: DevServerSettings) -> str:
 
             bootstrap().catch(() => {});
 
-            connectOverlayChannel();
+            __PYXLE_OVERLAY_BOOTSTRAP__
             document.addEventListener('click', handleLinkClick);
             document.addEventListener('mouseenter', handleLinkHover, { capture: true });
             window.addEventListener('popstate', handlePopState);
@@ -1377,6 +1146,258 @@ def _render_client_entry(settings: DevServerSettings) -> str:
         ).strip()
         + "\n"
     )
+
+
+    overlay_block = dedent(
+        """
+        const OVERLAY_CONTAINER_ID = '__PYXLE_ERROR_OVERLAY__';
+        const OVERLAY_RECONNECT_DELAY = 1000;
+
+        function ensureOverlayRoot() {
+          let container = document.getElementById(OVERLAY_CONTAINER_ID);
+          if (!container) {
+            container = document.createElement('div');
+            container.id = OVERLAY_CONTAINER_ID;
+            document.body.appendChild(container);
+          }
+          if (!container.__pyxle_overlay_root) {
+            container.__pyxle_overlay_root = ReactDOM.createRoot(container);
+          }
+          return container.__pyxle_overlay_root;
+        }
+
+        function OverlayDocument({ event, stackLines, breadcrumbs }) {
+          return React.createElement(
+            'div',
+            {
+              style: {
+                position: 'fixed',
+                inset: 0,
+                backgroundColor: 'rgba(15, 23, 42, 0.92)',
+                color: '#f8fafc',
+                fontFamily: 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+                padding: '2rem',
+                overflowY: 'auto',
+                zIndex: 2147483647,
+              },
+            },
+            [
+              React.createElement(
+                'div',
+                { key: 'header', style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' } },
+                [
+                  React.createElement(
+                    'div',
+                    { key: 'title', style: { fontSize: '1.5rem', fontWeight: 700 } },
+                    `⚠️ Loader/render error in ${event.routePath}`,
+                  ),
+                  React.createElement(
+                    'div',
+                    { key: 'actions', style: { display: 'flex', gap: '0.5rem' } },
+                    [
+                      React.createElement(
+                        'button',
+                        {
+                          key: 'retry',
+                          style: {
+                            backgroundColor: '#22c55e',
+                            color: '#0f172a',
+                            padding: '0.5rem 0.9rem',
+                            borderRadius: '0.5rem',
+                            fontWeight: 600,
+                            border: 'none',
+                            cursor: 'pointer',
+                          },
+                          onClick: () => window.location.reload(),
+                        },
+                        'Retry',
+                      ),
+                      React.createElement(
+                        'button',
+                        {
+                          key: 'dismiss',
+                          style: {
+                            backgroundColor: 'transparent',
+                            color: '#f8fafc',
+                            padding: '0.5rem 0.9rem',
+                            borderRadius: '0.5rem',
+                            fontWeight: 600,
+                            border: '1px solid rgba(148, 163, 184, 0.6)',
+                            cursor: 'pointer',
+                          },
+                          onClick: clearOverlay,
+                        },
+                        'Dismiss',
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              React.createElement(
+                'div',
+                { key: 'message', style: { marginBottom: '1rem', fontSize: '1.1rem' } },
+                event.message,
+              ),
+              breadcrumbs.length
+                ? React.createElement(
+                    'div',
+                    {
+                      key: 'breadcrumbs',
+                      style: {
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '0.75rem',
+                        marginBottom: '1rem',
+                      },
+                    },
+                    breadcrumbs.map((crumb, index) =>
+                      React.createElement(
+                        'div',
+                        {
+                          key: `crumb-${index}`,
+                          style: {
+                            padding: '0.9rem 1rem',
+                            borderRadius: '0.75rem',
+                            backgroundColor: 'rgba(148, 163, 184, 0.08)',
+                            border: '1px solid rgba(148, 163, 184, 0.2)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '0.35rem',
+                          },
+                        },
+                        [
+                          React.createElement(
+                            'div',
+                            {
+                              key: 'crumb-header',
+                              style: {
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                fontWeight: 600,
+                              },
+                            },
+                            [
+                              React.createElement('span', { key: 'label' }, crumb.label ?? `Stage ${index + 1}`),
+                              React.createElement(
+                                'span',
+                                {
+                                  key: 'status',
+                                  style: {
+                                    textTransform: 'uppercase',
+                                    fontSize: '0.75rem',
+                                    letterSpacing: '0.08em',
+                                    padding: '0.1rem 0.5rem',
+                                    borderRadius: '999px',
+                                    border: '1px solid rgba(148, 163, 184, 0.6)',
+                                  },
+                                },
+                                String(crumb.status ?? 'unknown').toUpperCase(),
+                              ),
+                            ],
+                          ),
+                          crumb.detail
+                            ? React.createElement(
+                                'p',
+                                {
+                                  key: 'detail',
+                                  style: {
+                                    margin: 0,
+                                    color: 'rgba(226, 232, 240, 0.85)',
+                                    fontSize: '0.9rem',
+                                  },
+                                },
+                                crumb.detail,
+                              )
+                            : null,
+                        ],
+                      ),
+                    ),
+                  )
+                : null,
+              stackLines.length
+                ? React.createElement(
+                    'pre',
+                    {
+                      key: 'stack',
+                      style: {
+                        backgroundColor: 'rgba(15, 23, 42, 0.6)',
+                        borderRadius: '0.75rem',
+                        padding: '1rem',
+                        fontSize: '0.85rem',
+                        lineHeight: 1.5,
+                        whiteSpace: 'pre-wrap',
+                      },
+                    },
+                    stackLines.join('\\n'),
+                  )
+                : null,
+            ],
+          );
+        }
+
+        function renderOverlay(event) {
+          const root = ensureOverlayRoot();
+          const stackLines = (event.stack ?? '').split('\\n').filter(Boolean);
+          const breadcrumbs = Array.isArray(event.breadcrumbs) ? event.breadcrumbs : [];
+          root.render(
+            React.createElement(OverlayDocument, { event, stackLines, breadcrumbs }),
+          );
+        }
+
+        function clearOverlay() {
+          const container = document.getElementById(OVERLAY_CONTAINER_ID);
+          if (!container || !container.__pyxle_overlay_root) {
+            return;
+          }
+          container.__pyxle_overlay_root.render(null);
+        }
+
+        function connectOverlayChannel() {
+          const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+          const url = `${protocol}//${window.location.host}/__pyxle__/overlay`;
+          const socket = new WebSocket(url);
+
+          socket.onmessage = (event) => {
+            try {
+              const payload = JSON.parse(event.data);
+              if (payload.type === 'error') {
+                renderOverlay(payload.payload ?? {});
+              } else if (payload.type === 'clear') {
+                clearOverlay();
+              } else if (payload.type === 'reload') {
+                const changed = Array.isArray(payload.payload?.changedPaths)
+                  ? payload.payload.changedPaths
+                  : [];
+                const reason = changed.length ? changed.join(', ') : 'server changes';
+                console.info(`[Pyxle] Reloading due to ${reason}`);
+                window.location.reload();
+              }
+            } catch (error) {
+              console.error('[Pyxle] Failed to parse overlay message', error);
+            }
+          };
+
+          socket.onclose = () => {
+            setTimeout(connectOverlayChannel, OVERLAY_RECONNECT_DELAY);
+          };
+
+          socket.onerror = () => {
+            socket.close();
+          };
+        }
+        """
+    ).strip()
+    overlay_bootstrap_call = "connectOverlayChannel();\n"
+
+    if settings.debug:
+        overlay_injection = overlay_block + "\n\n" if overlay_block else ""
+        content = content.replace("__PYXLE_OVERLAY_BLOCK__", overlay_injection, 1)
+        content = content.replace("__PYXLE_OVERLAY_BOOTSTRAP__", overlay_bootstrap_call, 1)
+    else:
+        content = content.replace("__PYXLE_OVERLAY_BLOCK__", "", 1)
+        content = content.replace("__PYXLE_OVERLAY_BOOTSTRAP__", "", 1)
+
     if settings.global_stylesheets:
         style_lines = [f"import '{sheet.import_specifier}';" for sheet in settings.global_stylesheets]
         style_block = "\n".join(style_lines) + "\n"

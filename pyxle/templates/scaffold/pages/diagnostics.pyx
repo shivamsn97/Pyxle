@@ -154,6 +154,8 @@ export const slots = {
     hero: ({ data }) => <PageHero page={data.page} />,
 };
 
+export const createSlots = () => slots;
+
 export default function Page({ data }) {
     const { middleware, api } = data;
     return (

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import time
 from asyncio.subprocess import PIPE
@@ -70,6 +71,7 @@ class ViteProcess:
 
         command = self._build_launch_command()
         self._logger.info("Launching Vite dev server: " + " ".join(command))
+        env = self._build_env()
 
         try:
             process = await self._process_factory(
@@ -77,6 +79,7 @@ class ViteProcess:
                 stdout=PIPE,
                 stderr=PIPE,
                 cwd=str(self._settings.project_root),
+                env=env,
             )
         except FileNotFoundError as exc:
             if not await self._recover_missing_vite():
@@ -91,6 +94,7 @@ class ViteProcess:
                 stdout=PIPE,
                 stderr=PIPE,
                 cwd=str(self._settings.project_root),
+                env=env,
             )
 
         self._process = process
@@ -270,6 +274,11 @@ class ViteProcess:
         if npx_exec is None:
             return None
         return (npx_exec, "--yes", "vite")
+
+    def _build_env(self) -> dict[str, str]:
+        env = dict(os.environ)
+        env.setdefault("PYXLE_VITE_BASE", "/")
+        return env
 
     def _log_process_output(self, stdout: bytes, stderr: bytes, *, prefix: str) -> None:
         stdout_text = stdout.decode(errors="ignore") if stdout else ""

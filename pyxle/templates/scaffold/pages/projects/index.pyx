@@ -115,6 +115,8 @@ export const slots = {
     hero: ({ data }) => <PageHero page={data.page} />,
 };
 
+export const createSlots = () => slots;
+
 export default function Page({ data }) {
     const { stack, commands } = data;
     return (

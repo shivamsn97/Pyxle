@@ -21,6 +21,9 @@ const DefaultHero = ({ data }) => {
     );
 };
 
+export const slots = {};
+export const createSlots = () => slots;
+
 export default function AppLayout({ children, data }) {
     const site = data?.site;
     const page = data?.page;

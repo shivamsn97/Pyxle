@@ -6,15 +6,20 @@ import asyncio
 import json
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 import typer
+import uvicorn
 
 from pyxle import __version__
+from pyxle.build.manifest import load_manifest
 from pyxle.compiler import CompilationResult, compile_file
 from pyxle.compiler.exceptions import CompilationError
 from pyxle.config import ConfigError, PyxleConfig, load_config
+from pyxle.devserver.registry import build_metadata_registry
+from pyxle.devserver.routes import build_route_table
 from pyxle.devserver.styles import GlobalStyleConfigError
 
 from .init import log_next_steps as _log_next_steps
@@ -24,6 +29,7 @@ from .logger import ConsoleLogger, LogFormat
 # Lazily loaded devserver components to avoid import cycles during test collection.
 DevServer = None  # type: ignore[assignment]
 DevServerSettings = None  # type: ignore[assignment]
+create_starlette_app = None  # type: ignore[assignment]
 
 app = typer.Typer(
     name="pyxle",
@@ -278,6 +284,12 @@ def dev(
         DevServer = _DevServer
         DevServerSettings = _DevServerSettings
 
+    global create_starlette_app
+    if create_starlette_app is None:  # noqa: PLC0206 - module-level caching
+        from pyxle.devserver.starlette_app import create_starlette_app as _create_starlette_app
+
+        create_starlette_app = _create_starlette_app
+
     if not project_root.exists():
         logger.error(f"Project directory '{project_root}' does not exist.")
         raise typer.Exit(code=1)
@@ -351,6 +363,12 @@ def build(
         "--out-dir",
         help="Directory where build artifacts should be written (defaults to <project>/dist).",
     ),
+    incremental: bool = typer.Option(
+        False,
+        "--incremental/--no-incremental",
+        help="Reuse cached artifacts to rebuild only changed files.",
+        show_default=True,
+    ),
 ) -> None:
     """Entry-point for the ``pyxle build`` command."""
 
@@ -400,11 +418,18 @@ def build(
             resolved_out_dir = (project_root / candidate).resolve()
 
     logger.info("Building Pyxle project for production")
+    if incremental:
+        logger.info("Incremental mode enabled — unchanged sources will be skipped")
 
     runner = _resolve_run_build()
 
     try:
-        result = runner(settings, logger=logger, dist_dir=resolved_out_dir)
+        result = runner(
+            settings,
+            logger=logger,
+            dist_dir=resolved_out_dir,
+            force_rebuild=not incremental,
+        )
     except Exception as exc:  # pragma: no cover - unexpected runtime errors
         logger.error(f"Build failed: {exc}")
         raise typer.Exit(code=1) from exc
@@ -427,6 +452,183 @@ def build(
         public_detail += " (not generated)"
     logger.step("Public assets", detail=public_detail)
     logger.step("Artifacts", detail=str(result.dist_dir))
+
+
+@app.command(help="Serve a production build without starting Vite.")
+def serve(
+    directory: Path = typer.Argument(
+        Path("."),
+        help="Project root containing the build artifacts.",
+        show_default=True,
+    ),
+    host: Optional[str] = typer.Option(
+        None,
+        "--host",
+        help="Hostname for the Starlette server (defaults to config or 127.0.0.1).",
+        show_default=False,
+    ),
+    port: Optional[int] = typer.Option(
+        None,
+        "--port",
+        help="Port for the Starlette server (defaults to config or 8000).",
+        show_default=False,
+    ),
+    dist_dir: Optional[Path] = typer.Option(
+        None,
+        "--dist-dir",
+        help="Directory containing production artifacts (defaults to <project>/dist).",
+    ),
+    skip_build: bool = typer.Option(
+        False,
+        "--skip-build/--no-skip-build",
+        help="Skip running `pyxle build` before serving.",
+        show_default=True,
+    ),
+    config_file: Optional[Path] = typer.Option(
+        None,
+        "--config",
+        help="Path to a pyxle.config.json file (defaults to <project>/pyxle.config.json).",
+    ),
+    serve_static: bool = typer.Option(
+        True,
+        "--serve-static/--no-serve-static",
+        help="Serve dist/public and /client assets directly from pyxle serve (disable when offloading to a CDN).",
+        show_default=True,
+    ),
+) -> None:
+    """Entry-point for the ``pyxle serve`` command."""
+
+    logger = get_logger()
+    project_root = _ensure_directory(directory, logger)
+
+    global DevServerSettings
+    if DevServerSettings is None:  # noqa: PLC0206 - module-level caching
+        from pyxle.devserver import DevServerSettings as _DevServerSettings
+
+        DevServerSettings = _DevServerSettings
+
+    global create_starlette_app
+    if create_starlette_app is None:  # noqa: PLC0206 - module-level caching
+        from pyxle.devserver.starlette_app import create_starlette_app as _create_starlette_app
+
+        create_starlette_app = _create_starlette_app
+
+    try:
+        file_config: PyxleConfig = load_config(project_root, config_path=config_file)
+    except ConfigError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    production_config = file_config.apply_overrides(
+        debug=False,
+        starlette_host=host,
+        starlette_port=port,
+    )
+    resolved_styles = _resolve_global_style_entries(project_root, production_config)
+
+    try:
+        settings = DevServerSettings.from_project_root(  # type: ignore[union-attr]
+            project_root,
+            **production_config.to_devserver_kwargs(),
+            global_stylesheets=resolved_styles,
+        )
+    except GlobalStyleConfigError as exc:
+        logger.error(str(exc))
+        raise typer.Exit(code=1) from exc
+
+    resolved_dist = _resolve_dist_directory(project_root, dist_dir)
+
+    if not skip_build:
+        logger.info("Building project before serving")
+        runner = _resolve_run_build()
+        try:
+            runner(settings, logger=logger, dist_dir=resolved_dist, force_rebuild=True)
+        except Exception as exc:  # pragma: no cover - unexpected runtime errors
+            logger.error(f"Build failed: {exc}")
+            raise typer.Exit(code=1) from exc
+    else:
+        logger.warning("Skipping production build; using existing dist artifacts.")
+
+    manifest_path = resolved_dist / "page-manifest.json"
+    if not manifest_path.exists():
+        logger.error(
+            f"page-manifest.json not found at '{manifest_path}'. Run `pyxle build` first or remove --skip-build."
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        manifest_data = load_manifest(manifest_path)
+    except Exception as exc:  # pragma: no cover - defensive logging
+        logger.error(f"Failed to load page-manifest.json: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    settings = replace(settings, debug=False, page_manifest=manifest_data)
+
+    try:
+        registry = build_metadata_registry(settings)
+        route_table = build_route_table(registry)
+    except Exception as exc:  # pragma: no cover - unexpected runtime errors
+        logger.error(f"Failed to prepare routes: {exc}")
+        raise typer.Exit(code=1) from exc
+
+    public_static_dir: Path | None
+    client_mount_dir: Path | None
+
+    if serve_static:
+        public_dir = resolved_dist / "public"
+        if not public_dir.exists():
+            logger.warning(
+                f"Public assets directory '{public_dir}' does not exist; falling back to '{settings.public_dir}'."
+            )
+            public_static_dir = settings.public_dir
+        else:
+            public_static_dir = public_dir
+
+        client_static_dir = resolved_dist / "client"
+        if not client_static_dir.exists():
+            logger.warning(
+                f"Client asset directory '{client_static_dir}' does not exist; /client requests will 404."
+            )
+            client_mount_dir = None
+        else:
+            client_mount_dir = client_static_dir
+    else:
+        logger.info("Static asset serving disabled; ensure your CDN or reverse proxy hosts / and /client assets.")
+        public_static_dir = None
+        client_mount_dir = None
+
+    app = create_starlette_app(
+        settings,
+        route_table,
+        logger=logger,
+        public_static_dir=public_static_dir,
+        client_static_dir=client_mount_dir,
+        serve_static=serve_static,
+    )
+    app.state.pyxle_ready = True
+
+    logger.info(
+        f"Serving Pyxle build on http://{settings.starlette_host}:{settings.starlette_port} (dist: {resolved_dist})"
+    )
+
+    config = uvicorn.Config(
+        app,
+        host=settings.starlette_host,
+        port=settings.starlette_port,
+        loop="asyncio",
+        reload=False,
+        lifespan="auto",
+        log_config=None,
+    )
+    server = uvicorn.Server(config)
+
+    try:
+        asyncio.run(server.serve())
+    except KeyboardInterrupt:  # pragma: no cover - handled manually during runtime
+        logger.warning("Keyboard interrupt received; stopping production server")
+    except Exception as exc:  # pragma: no cover - unexpected runtime errors
+        logger.error(f"Production server encountered an error: {exc}")
+        raise typer.Exit(code=1) from exc
 
 @app.command(name="compile", help="Compile a single .pyx file (developer utility).", hidden=True)
 def compile_command(
@@ -516,3 +718,15 @@ def _resolve_global_style_entries(project_root: Path, config: PyxleConfig) -> tu
         normalized.append(candidate)
 
     return tuple(normalized)
+
+
+def _resolve_dist_directory(project_root: Path, dist_dir: Optional[Path]) -> Path:
+    """Return the resolved distribution directory for production assets."""
+
+    if dist_dir is None:
+        return (project_root / "dist").resolve()
+
+    candidate = dist_dir.expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (project_root / candidate).resolve()

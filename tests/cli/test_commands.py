@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
+from types import SimpleNamespace
 
 import pytest
 import typer
@@ -162,6 +163,157 @@ def test_run_subprocess_handles_missing_binary(monkeypatch, tmp_path) -> None:
 
     with pytest.raises(typer.Exit):
         cli._run_subprocess(["npm", "install"], cwd=tmp_path, label="Node", logger=logger)
+
+
+def test_serve_command_runs_build_and_uvicorn(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir(parents=True)
+
+        dist_root = project / "dist"
+        client_dir = dist_root / "client"
+        public_dir = dist_root / "public"
+        client_dir.mkdir(parents=True, exist_ok=True)
+        public_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = dist_root / "page-manifest.json"
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text('{"/": {"client": {"file": "client/bundle.js"}}}', encoding="utf-8")
+
+        captured: dict[str, object] = {}
+
+        def fake_run_build(settings, *, logger, dist_dir=None, force_rebuild=True):
+            captured["build_settings"] = settings
+            captured["dist_dir"] = dist_dir
+            captured["force_rebuild"] = force_rebuild
+
+        monkeypatch.setattr(cli, "run_build", fake_run_build)
+
+        registry_sentinel = object()
+        route_table_sentinel = object()
+
+        monkeypatch.setattr(cli, "build_metadata_registry", lambda settings: registry_sentinel)
+        monkeypatch.setattr(cli, "build_route_table", lambda registry: route_table_sentinel)
+
+        app_instance = SimpleNamespace(state=SimpleNamespace(pyxle_ready=False))
+
+        def fake_create_app(settings, routes, **kwargs):
+            captured["create_settings"] = settings
+            captured["routes"] = routes
+            captured["create_kwargs"] = kwargs
+            return app_instance
+
+        monkeypatch.setattr(cli, "create_starlette_app", fake_create_app)
+
+        class StubServer:
+            def __init__(self, config):
+                captured["uvicorn_config"] = config
+
+            async def serve(self):
+                captured["served"] = True
+
+        monkeypatch.setattr(cli.uvicorn, "Server", StubServer)
+
+        def fake_asyncio_run(coro):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        monkeypatch.setattr(cli.asyncio, "run", fake_asyncio_run)
+
+        result = runner.invoke(
+            app,
+            [
+                "serve",
+                "demo",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8200",
+            ],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 0, result.stdout
+        assert captured["dist_dir"] == (project / "dist").resolve()
+        assert captured["force_rebuild"] is True
+        assert captured["routes"] is route_table_sentinel
+        assert captured["create_kwargs"]["public_static_dir"] == public_dir.resolve()
+        assert captured["create_kwargs"]["client_static_dir"] == client_dir.resolve()
+        assert app_instance.state.pyxle_ready is True
+        assert captured.get("served") is True
+
+
+def test_serve_command_can_disable_static_mounts(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir(parents=True)
+
+        dist_root = project / "dist"
+        dist_root.mkdir(parents=True, exist_ok=True)
+        (dist_root / "page-manifest.json").write_text('{}', encoding="utf-8")
+
+        monkeypatch.setattr(cli, "run_build", lambda *_, **__: None)
+        monkeypatch.setattr(cli, "build_metadata_registry", lambda settings: object())
+        monkeypatch.setattr(cli, "build_route_table", lambda registry: object())
+
+        captured: dict[str, object] = {}
+
+        def fake_create_app(*_, **kwargs):
+            captured.update(kwargs)
+            app_instance = SimpleNamespace(state=SimpleNamespace(pyxle_ready=False))
+            return app_instance
+
+        monkeypatch.setattr(cli, "create_starlette_app", fake_create_app)
+
+        class StubServer:
+            def __init__(self, config):
+                pass
+
+            async def serve(self):
+                return None
+
+        monkeypatch.setattr(cli.uvicorn, "Server", StubServer)
+        def fake_asyncio_run(coro):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro)
+            finally:
+                loop.close()
+
+        monkeypatch.setattr(cli.asyncio, "run", fake_asyncio_run)
+
+        result = runner.invoke(app, ["serve", "demo", "--no-serve-static"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert captured["public_static_dir"] is None
+        assert captured["client_static_dir"] is None
+        assert captured["serve_static"] is False
+
+
+def test_serve_command_requires_manifest_when_skipping_build(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir(parents=True)
+
+        # Ensure run_build is not invoked when skipping
+        def fake_run_build(*_, **__):  # pragma: no cover - should not be called
+            raise AssertionError("run_build should not run when --skip-build is set")
+
+        monkeypatch.setattr(cli, "run_build", fake_run_build)
+
+        result = runner.invoke(
+            app,
+            ["serve", "demo", "--skip-build"],
+            catch_exceptions=False,
+        )
+
+        assert result.exit_code == 1
+        assert "page-manifest" in result.stdout
 
 
 def test_install_dependencies_flag_skips(monkeypatch, tmp_path) -> None:
@@ -375,10 +527,11 @@ def test_build_command_invokes_pipeline(monkeypatch) -> None:
 
         captured: dict[str, object] = {}
 
-        def fake_run_build(settings, *, logger, dist_dir=None):
+        def fake_run_build(settings, *, logger, dist_dir=None, force_rebuild=True):
             captured["settings"] = settings
             captured["logger"] = logger
             captured["dist_dir"] = dist_dir
+            captured["force_rebuild"] = force_rebuild
             from pyxle.build.pipeline import BuildResult
             from pyxle.devserver.builder import BuildSummary
             from pyxle.devserver.registry import MetadataRegistry
@@ -424,6 +577,7 @@ def test_build_command_invokes_pipeline(monkeypatch) -> None:
         assert settings.project_root == project.resolve()
         expected_out_dir = (project / "dist-prod").resolve()
         assert captured["dist_dir"] == expected_out_dir
+        assert captured["force_rebuild"] is True
         assert "Build completed" in result.stdout
         assert "Artifacts" in result.stdout
         assert "Client manifest" in result.stdout
@@ -433,13 +587,58 @@ def test_build_command_invokes_pipeline(monkeypatch) -> None:
         assert "Public assets" in result.stdout
 
 
+def test_build_command_supports_incremental_flag(monkeypatch) -> None:
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir(parents=True)
+
+        captured: dict[str, object] = {}
+
+        def fake_run_build(settings, *, logger, dist_dir=None, force_rebuild=True):
+            captured["force_rebuild"] = force_rebuild
+            from pyxle.build.pipeline import BuildResult
+            from pyxle.devserver.builder import BuildSummary
+            from pyxle.devserver.registry import MetadataRegistry
+
+            summary = BuildSummary()
+            result_dist = settings.project_root / "dist"
+            (result_dist / "client").mkdir(parents=True, exist_ok=True)
+            (result_dist / "server").mkdir(parents=True, exist_ok=True)
+            (result_dist / "metadata").mkdir(parents=True, exist_ok=True)
+            (result_dist / "public").mkdir(parents=True, exist_ok=True)
+            client_manifest_path = result_dist / "client" / "manifest.json"
+            client_manifest_path.write_text("{}", encoding="utf-8")
+            page_manifest_path = result_dist / "page-manifest.json"
+            page_manifest_path.write_text("{}", encoding="utf-8")
+            return BuildResult(
+                dist_dir=result_dist,
+                client_dir=result_dist / "client",
+                server_dir=result_dist / "server",
+                metadata_dir=result_dist / "metadata",
+                public_dir=result_dist / "public",
+                client_manifest_path=client_manifest_path,
+                page_manifest={},
+                page_manifest_path=page_manifest_path,
+                summary=summary,
+                registry=MetadataRegistry(pages=[], apis=[]),
+            )
+
+        monkeypatch.setattr("pyxle.cli.run_build", fake_run_build)
+
+        result = runner.invoke(app, ["build", "demo", "--incremental"], catch_exceptions=False)
+
+        assert result.exit_code == 0, result.stdout
+        assert captured.get("force_rebuild") is False
+
+
 def test_build_command_logs_missing_public_assets(monkeypatch) -> None:
     with runner.isolated_filesystem():
         project = Path("demo")
         (project / "pages").mkdir(parents=True)
         (project / "public").mkdir(parents=True)
 
-        def fake_run_build(settings, *, logger, dist_dir=None):
+        def fake_run_build(settings, *, logger, dist_dir=None, force_rebuild=True):
             from pyxle.build.pipeline import BuildResult
             from pyxle.devserver.builder import BuildSummary
             from pyxle.devserver.registry import MetadataRegistry

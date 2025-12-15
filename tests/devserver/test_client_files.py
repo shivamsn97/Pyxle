@@ -109,6 +109,23 @@ def test_client_entry_includes_global_style_imports(tmp_path: Path) -> None:
     assert f"import '{import_statement}';" in client_entry
 
 
+def test_client_entry_omits_overlay_in_production(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "pages").mkdir(parents=True)
+    (root / "public").mkdir()
+
+    dev_settings = DevServerSettings.from_project_root(root, debug=True)
+    prod_settings = DevServerSettings.from_project_root(root, debug=False)
+
+    dev_entry = _render_client_entry(dev_settings)
+    prod_entry = _render_client_entry(prod_settings)
+
+    assert "__PYXLE_ERROR_OVERLAY__" in dev_entry
+    assert "/__pyxle__/overlay" in dev_entry
+    assert "__PYXLE_ERROR_OVERLAY__" not in prod_entry
+    assert "/__pyxle__/overlay" not in prod_entry
+
+
 def test_vite_config_aliases_cover_client_runtime(tmp_path: Path) -> None:
     settings = create_project(tmp_path)
     vite_config = _render_vite_config(settings)
@@ -116,3 +133,11 @@ def test_vite_config_aliases_cover_client_runtime(tmp_path: Path) -> None:
     assert "find: /^pyxle\\/client$/" in vite_config
     assert "find: /^pyxle\\/client\\/(.+)$/" in vite_config
     assert "find: 'pyxle/client'" not in vite_config
+
+
+def test_vite_config_respects_base_environment(tmp_path: Path) -> None:
+    settings = create_project(tmp_path)
+    vite_config = _render_vite_config(settings)
+
+    assert "const base = process.env.PYXLE_VITE_BASE ?? '/';" in vite_config
+    assert "base," in vite_config

@@ -14,12 +14,14 @@ from typing import Iterable, Sequence
 
 from starlette.applications import Starlette
 from starlette.endpoints import HTTPEndpoint
+from starlette.exceptions import HTTPException
 from starlette.middleware import Middleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount, Router, WebSocketRoute
 from starlette.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
 
 from pyxle.cli.logger import ConsoleLogger
 from pyxle.ssr import (
@@ -57,6 +59,103 @@ def _ensure_project_root_on_sys_path(project_root: Path) -> None:
 
 class ApiRouteError(RuntimeError):
     """Raised when an API module cannot be resolved to a valid handler."""
+
+
+class HttpOnlyStaticFiles(StaticFiles):
+    """Static files app that gracefully rejects non-HTTP scopes."""
+
+    def __init__(self, *args, close_code: int = 4404, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._close_code = close_code
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        scope_type = scope.get("type")
+        if scope_type != "http":
+            if scope_type == "websocket":
+                await send({"type": "websocket.close", "code": self._close_code})
+                return
+            return
+        await super().__call__(scope, receive, send)
+
+
+class StaticAssetsMiddleware:
+    """Serve client + public assets ahead of dynamic catch-all routes."""
+
+    def __init__(
+        self,
+        app,
+        *,
+        public_directory: Path | None = None,
+        client_directory: Path | None = None,
+    ) -> None:
+        self.app = app
+        self._public_static = (
+            HttpOnlyStaticFiles(directory=public_directory, check_dir=False)
+            if public_directory is not None
+            else None
+        )
+        self._client_static = (
+            HttpOnlyStaticFiles(directory=client_directory, check_dir=False)
+            if client_directory is not None
+            else None
+        )
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "GET").upper()
+        if method not in ("GET", "HEAD"):
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+
+        if self._client_static is not None and path.startswith("/client"):
+            if await self._try_static(
+                self._client_static,
+                scope,
+                receive,
+                send,
+                prefix="/client",
+            ):
+                return
+
+        if self._public_static is not None and not path.startswith("/client"):
+            if await self._try_static(self._public_static, scope, receive, send):
+                return
+
+        await self.app(scope, receive, send)
+
+    @staticmethod
+    async def _try_static(
+        static_app: HttpOnlyStaticFiles,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        *,
+        prefix: str = "",
+    ) -> bool:
+        selected_scope = scope
+        if prefix:
+            path = scope.get("path", "")
+            if not path.startswith(prefix):
+                return False
+            stripped = path[len(prefix) :] or "/"
+            candidate = dict(scope)
+            candidate["path"] = stripped
+            raw_path = scope.get("raw_path")
+            if isinstance(raw_path, (bytes, bytearray)):
+                candidate["raw_path"] = stripped.encode("utf-8")
+            selected_scope = candidate
+        try:
+            await static_app(selected_scope, receive, send)
+            return True
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return False
+            raise
 
 
 def build_api_router(
@@ -206,11 +305,24 @@ def _make_page_handler(
     return handler
 
 
-def build_static_files_mount(settings: DevServerSettings) -> Mount:
-    """Return a Starlette ``Mount`` serving the project's ``public/`` directory."""
+def build_static_files_mount(
+    settings: DevServerSettings,
+    *,
+    directory: Path | None = None,
+    mount_path: str = "/",
+) -> Mount:
+    """Return a Starlette ``Mount`` serving static assets."""
 
-    static_app = StaticFiles(directory=settings.public_dir, check_dir=False)
-    return Mount("/", app=static_app, name="pyxle-public")
+    target = directory or settings.public_dir
+    static_app = HttpOnlyStaticFiles(directory=target, check_dir=False)
+    return Mount(mount_path, app=static_app, name="pyxle-public")
+
+
+def build_client_assets_mount(directory: Path, *, mount_path: str = "/client") -> Mount:
+    """Serve built client bundles (e.g., ``dist/client``) under ``/client``."""
+
+    static_app = HttpOnlyStaticFiles(directory=directory, check_dir=False)
+    return Mount(mount_path, app=static_app, name="pyxle-client-assets")
 
 
 
@@ -219,8 +331,11 @@ def create_starlette_app(
     routes: RouteTable,
     *,
     logger: ConsoleLogger | None = None,
+    public_static_dir: Path | None = None,
+    client_static_dir: Path | None = None,
+    serve_static: bool = True,
 ) -> Starlette:
-    """Assemble a Starlette application exposing API, page, and static routes."""
+    """Assemble a Starlette application exposing API/page routes and optional static mounts."""
 
     console_logger = logger or ConsoleLogger()
 
@@ -228,9 +343,28 @@ def create_starlette_app(
 
     _ensure_project_root_on_sys_path(settings.project_root)
 
-    vite_proxy = ViteProxy(settings, logger=console_logger)
     renderer = ComponentRenderer()
-    overlay = OverlayManager(logger=console_logger)
+    overlay: OverlayManager | None = None
+    vite_proxy: ViteProxy | None = None
+    proxy_middleware: Middleware | None = None
+    static_middleware: Middleware | None = None
+
+    if settings.debug:
+        vite_proxy = ViteProxy(settings, logger=console_logger)
+        overlay = OverlayManager(logger=console_logger)
+
+        class _ViteProxyMiddleware(BaseHTTPMiddleware):
+            def __init__(self, app):
+                super().__init__(app)
+                self._proxy = vite_proxy
+
+            async def dispatch(self, request: Request, call_next):  # pragma: no cover - middleware wrapper
+                if self._proxy.should_proxy(request):
+                    return await self._proxy.handle(request)
+                return await call_next(request)
+
+        proxy_middleware = Middleware(_ViteProxyMiddleware)
+
     try:
         user_middleware = load_custom_middlewares(settings.custom_middlewares)
     except MiddlewareHookError as exc:
@@ -244,24 +378,28 @@ def create_starlette_app(
         console_logger.error(str(exc))
         raise
 
-    class _ViteProxyMiddleware(BaseHTTPMiddleware):
-        def __init__(self, app):
-            super().__init__(app)
-            self._proxy = vite_proxy
-
-        async def dispatch(self, request: Request, call_next):  # pragma: no cover - middleware wrapper
-            if self._proxy.should_proxy(request):
-                return await self._proxy.handle(request)
-            return await call_next(request)
-
     @asynccontextmanager
     async def lifespan(app: Starlette):  # pragma: no cover - lifecycle orchestration
         try:
             yield
         finally:
-            await vite_proxy.close()
+            if vite_proxy is not None:
+                await vite_proxy.close()
 
-    middleware_stack = [*user_middleware, Middleware(_ViteProxyMiddleware)]
+    if serve_static:
+        public_directory = public_static_dir or settings.public_dir
+        static_middleware = Middleware(
+            StaticAssetsMiddleware,
+            public_directory=public_directory if public_directory.exists() else None,
+            client_directory=client_static_dir if client_static_dir and client_static_dir.exists() else None,
+        )
+
+    middleware_stack: list[Middleware] = []
+    if static_middleware is not None:
+        middleware_stack.append(static_middleware)
+    middleware_stack.extend(user_middleware)
+    if proxy_middleware is not None:
+        middleware_stack.append(proxy_middleware)
 
     app = Starlette(
         debug=settings.debug,
@@ -283,16 +421,14 @@ def create_starlette_app(
         overlay=overlay,
         route_hooks=[*DEFAULT_PAGE_POLICIES, *page_route_hooks],
     )
-    static_mount = build_static_files_mount(settings)
-
     app.router.routes.extend(api_router.routes)
     app.router.routes.extend(page_router.routes)
-    app.router.routes.append(
-        WebSocketRoute("/__pyxle__/overlay", overlay.websocket_endpoint)
-    )
+    if overlay is not None:
+        app.router.routes.append(
+            WebSocketRoute("/__pyxle__/overlay", overlay.websocket_endpoint)
+        )
     app.router.add_route("/healthz", _healthz_endpoint, methods=["GET"])
     app.router.add_route("/readyz", _readyz_endpoint, methods=["GET"])
-    app.router.routes.append(static_mount)
 
     app.state.vite_proxy = vite_proxy
     app.state.ssr_renderer = renderer
@@ -352,6 +488,7 @@ __all__ = [
     "build_api_router",
     "build_page_router",
     "build_static_files_mount",
+    "build_client_assets_mount",
     "create_starlette_app",
     "ApiRouteError",
 ]

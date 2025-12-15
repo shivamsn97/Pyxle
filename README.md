@@ -30,8 +30,7 @@ server working together with screenshots and overlay tips.
 - `pyxle init <name> --install` — Scaffold and immediately install Python + Node dependencies.
 - `pyxle init <name> --template <template>` — Placeholder for future template variants (only `default` is currently accepted).
 - `pyxle install [path]` — Runs `python -m pip install -r requirements.txt` and `npm install` (use `--no-python` / `--no-node` to skip either step).
-- `pyxle dev [path]` — Run the development server with hot reload (flags include `--host`, `--port`, `--vite-host`, `--vite-port`, and `--no-debug`).
-- `pyxle build [path] --out-dir <dir>` — Run the production pipeline. Copies server + metadata artifacts, bundles public assets, executes the Vite production build, and writes both `manifest.json` and `page-manifest.json` so SSR can look up hashed files later.
+- `pyxle serve [path] --dist-dir <dir>` — Boot the production Starlette app without Vite. Runs `pyxle build` by default, then serves the contents of `dist/` via Uvicorn (add `--skip-build` when you only want to reuse existing artifacts). Disable the built-in static mounts with `--no-serve-static` if a CDN or edge proxy owns your asset hosting.
 
 ## Custom middleware hooks
 
@@ -91,17 +90,21 @@ Pyxle ships with default policies that keep `request.scope["pyxle"]["route"]` po
 
 ## Deployment
 
-Use `pyxle build` to compile production artifacts and `pyxle dev --no-debug` as the interim server runtime until the dedicated `pyxle serve` command lands.
+Use `pyxle build` to compile production artifacts and `pyxle serve` to run them with Uvicorn (no Vite required).
 
 ```bash
 # Build to ./dist (override with --out-dir)
 pyxle build --out-dir dist
 
-# Run the server with production-style logging
-pyxle dev --host 0.0.0.0 --port 8080 --vite-port 4173 --no-debug --log-format json
+# Serve the built app without Vite (runs pyxle build first unless --skip-build is set)
+pyxle serve --dist-dir dist --host 0.0.0.0 --port 8080 --log-format json
+# Skip static mounts when assets live behind a CDN or object store
+pyxle serve --dist-dir dist --no-serve-static
 ```
 
-When `--no-debug` (or config `debug: false`) is active, the SSR runtime automatically loads `dist/page-manifest.json` and emits hashed JS/CSS bundles instead of pointing at the Vite dev server. Always run `pyxle build` before starting a production-style process so the manifest is present.
+Need faster subsequent builds? Append `--incremental` when re-running `pyxle build` to reuse the `.pyxle-build/` cache so only modified pages/APIs and assets are recompiled before the artifacts are copied into `dist/`.
+
+`pyxle serve` automatically loads `dist/page-manifest.json`, mounts `dist/public` at `/`, exposes hashed bundles under `/client`, and starts the Starlette app with readiness probes enabled. Pass `--skip-build` when deploying prebuilt artifacts (for example, CI/CD pipelines that archive `dist/`).
 
 See [`docs/deployment.md`](docs/deployment.md) for the full checklist covering prerequisites, readiness probes, and CI recommendations.
 

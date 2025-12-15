@@ -81,11 +81,11 @@ class ViteProxy:
         params: Iterable[tuple[str, str]] = list(request.query_params.multi_items())
 
         stream_cm = self._client.stream(
-            request.method,
-            request.url.path,
-            params=params,
-            headers=headers,
-            content=body if body else None,
+                request.method,
+                f"http://{self._settings.vite_host}:{self._settings.vite_port}{request.url.path}",
+                params=params,
+                headers=headers,
+                content=body if body else None,
         )
 
         try:

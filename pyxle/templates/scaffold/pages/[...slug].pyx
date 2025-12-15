@@ -40,6 +40,8 @@ export const slots = {
     hero: ({ data }) => <NotFoundHero page={data.page} />,
 };
 
+export const createSlots = () => slots;
+
 export default function NotFoundPage({ data }) {
     const { page } = data;
     return (

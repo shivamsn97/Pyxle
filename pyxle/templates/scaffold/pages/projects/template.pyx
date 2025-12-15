@@ -25,6 +25,8 @@ export const slots = {
     hero: ({ data }) => <TemplateHero data={data} />,
 };
 
+export const createSlots = () => slots;
+
 export default function ProjectsTemplate({ children, data }) {
     return (
         <div className="pyxle-template pyxle-template--projects">

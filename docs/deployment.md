@@ -85,6 +85,8 @@ What the command does:
 4. Executes a Vite production build, emitting hashed bundles into `dist/client`.
 5. Generates the Pyxle page manifest (used for future SSR + asset lookup).
 
+For repeated builds during staging or CI iterations, pass `--incremental` so `pyxle build` reuses the `.pyxle-build/` cache and skips recompiling unchanged pages/APIs. The distribution folder is still refreshed each run, so deployment artifacts stay consistent even when most sources are unchanged.
+
 When the build finishes, the CLI lists the most important artifact locations so CI logs double as a deployment checklist:
 
 - `Client manifest` — Vite's `manifest.json` inside `dist/client/`.
@@ -112,7 +114,7 @@ dist/
 - The Starlette app automatically loads that manifest on startup, so make sure `pyxle build` has been executed and the entire `dist/` folder (including `page-manifest.json`) is deployed alongside your server modules.
 - Missing or stale manifest data falls back to a plain HTML warning encouraging you to rebuild, so you can quickly detect when the production assets are out of sync.
 
-Host `dist/client` via your CDN or web server, and bundle `dist/server` + `dist/metadata` with your ASGI application container. (A dedicated `pyxle serve` target is on the roadmap; for now the server package mirrors the development runtime.)
+`pyxle serve` reads from the same `dist/` tree, mounts `dist/public` at `/`, exposes `/client/` assets directly from `dist/client`, and reuses the SSR runtime from the dev server without launching Vite. Deploy workflows can either run `pyxle build && pyxle serve` on the target host or run `pyxle build --out-dir dist` in CI, archive the folder, and use `pyxle serve --skip-build --dist-dir dist` to run the prebuilt artifacts.
 
 ### Continuous integration tips
 
@@ -120,26 +122,33 @@ Host `dist/client` via your CDN or web server, and bundle `dist/server` + `dist/
 - Archive the entire `dist/` folder as an artifact so deploy environments do not need Node installed.
 - Fail the pipeline if `pyxle build` exits non-zero — Vite and the compiler bubble actionable errors.
 
-## 4. Starting the server in production today
+## 4. Serving the production build (`pyxle serve`)
 
-Until the dedicated production runner lands, the recommended approach is to run `pyxle dev` behind a process manager with debug features disabled:
+Run the production server with a single command:
 
 ```bash
-PYXLE_ENV=production pyxle dev \
+pyxle serve \
+  --dist-dir dist \
   --host 0.0.0.0 \
   --port 8080 \
-  --vite-port 4173 \
-  --no-debug \
   --log-format json
 ```
 
+Behavior highlights:
+
+- Runs `pyxle build` automatically unless `--skip-build` is provided.
+- Loads `dist/page-manifest.json`, attaches it to `DevServerSettings`, and streams SSR responses with hashed bundles.
+- Mounts `dist/public` at `/` and `dist/client` at `/client`, so requests never pass through Vite.
+- Pass `--no-serve-static` to skip those mounts entirely when a CDN or reverse proxy is already serving the contents of `dist/public` and `dist/client`.
+- Keeps `/healthz` and `/readyz` online; `pyxle serve` sets the readiness flag immediately after startup so probes return `200` as soon as Uvicorn is listening.
+
 Guidelines:
 
-- Run under `systemd`, `supervisord`, or a container platform so the process auto-restarts.
-- Terminate TLS at a reverse proxy (NGINX, Caddy, Fly.io, etc.) and forward traffic to `pyxle dev`.
-- Use the `/readyz` endpoint as a readiness probe so load balancers wait for Vite to come online.
-- Configure observability by pointing structured logs to your log shipper when using `--log-format json`.
+- Run under `systemd`, `supervisord`, or a container coordinator (Docker, Fly.io, etc.) so the process restarts automatically.
+- Terminate TLS at a reverse proxy and forward to the configured host/port.
+- Emit structured logs via `--log-format json` when shipping to a log aggregator.
+- Use `--skip-build` only when you have already copied a fresh `dist/` directory onto the host; otherwise leave the default behavior in place to avoid stale manifests.
 
 ## 5. What’s next
 
-The roadmap tracks an upcoming `pyxle serve` command that will boot the Starlette app directly from `dist/` without Vite. The documentation above will evolve accordingly; for now the combination of `pyxle build` + `pyxle dev --no-debug` covers both preview and production deployments.
+Upcoming roadmap milestones focus on streaming SSR, data revalidation hooks, and deployment adapters (edge/serverless) so `pyxle serve` can be paired with multiple hosting targets. Keep an eye on `roadmap.md` for the active checklist.

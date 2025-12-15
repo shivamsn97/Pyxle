@@ -87,6 +87,8 @@ export const slots = {
         hero: ({ data }) => <HomeHero data={data} />,
 };
 
+export const createSlots = () => slots;
+
 export default function Page({ data }) {
         const { routes } = data;
         return (

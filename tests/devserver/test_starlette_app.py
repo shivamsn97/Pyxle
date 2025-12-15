@@ -10,6 +10,7 @@ from starlette.applications import Starlette
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.staticfiles import StaticFiles
 from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from pyxle.cli.logger import ConsoleLogger
 from pyxle.devserver.builder import build_once
@@ -158,6 +159,21 @@ def test_build_static_files_mount_serves_public_directory(project: DevServerSett
     assert Path(mount.app.directory) == project.public_dir
 
 
+def test_build_static_files_mount_rejects_websocket_scope(project: DevServerSettings) -> None:
+    mount = build_static_files_mount(project)
+
+    app = Starlette()
+    app.router.routes.append(mount)
+
+    client = TestClient(app)
+
+    with pytest.raises(WebSocketDisconnect) as excinfo:
+        with client.websocket_connect("/__pyxle__/overlay"):
+            pass
+
+    assert getattr(excinfo.value, "code", None) == 4404
+
+
 def test_create_starlette_app_combines_routes(project: DevServerSettings, monkeypatch) -> None:
     static_file = project.public_dir / "robots.txt"
     static_file.write_text("User-agent: *\nAllow: /\n", encoding="utf-8")
@@ -202,6 +218,62 @@ def test_create_starlette_app_combines_routes(project: DevServerSettings, monkey
 
     with client.websocket_connect("/__pyxle__/overlay") as websocket:
         websocket.close()
+
+
+def test_static_assets_middleware_handles_catchall_routes(project: DevServerSettings, monkeypatch, tmp_path: Path) -> None:
+    write_file(
+        project.pages_dir / "[...slug].pyx",
+        """
+import React from 'react';
+
+export default function Fallback() {
+    return <div>fallback</div>;
+}
+""",
+    )
+
+    public_styles = project.public_dir / "styles"
+    public_styles.mkdir(parents=True, exist_ok=True)
+    (public_styles / "site.css").write_text("body { color: red; }", encoding="utf-8")
+
+    client_assets = tmp_path / "dist-client"
+    (client_assets / "assets").mkdir(parents=True)
+    (client_assets / "assets" / "bundle.js").write_text("console.log('hi')", encoding="utf-8")
+
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    async def fake_build_page_response(*_, **__):  # pragma: no cover - deterministic HTML
+        return HTMLResponse("<div>page</div>")
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.build_page_response",
+        fake_build_page_response,
+    )
+
+    prod_settings = replace(project, debug=False, page_manifest={})
+
+    app = create_starlette_app(
+        prod_settings,
+        table,
+        serve_static=True,
+        client_static_dir=client_assets,
+    )
+
+    client = TestClient(app)
+
+    css_response = client.get("/styles/site.css")
+    assert css_response.status_code == 200
+    assert "color: red" in css_response.text
+
+    bundle_response = client.get("/client/assets/bundle.js")
+    assert bundle_response.status_code == 200
+    assert "console.log" in bundle_response.text
+
+    fallback_response = client.get("/unknown/path")
+    assert fallback_response.status_code == 200
+    assert "page" in fallback_response.text
 
 
 def test_create_starlette_app_uses_vite_proxy(project: DevServerSettings, monkeypatch) -> None:
@@ -250,6 +322,81 @@ def test_create_starlette_app_uses_vite_proxy(project: DevServerSettings, monkey
     assert captured == ["/@vite/client"]
     assert shutdown_flag == [True]
 
+
+def test_create_starlette_app_serves_client_assets_in_production(
+    project: DevServerSettings,
+    monkeypatch,
+) -> None:
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    renderer = object()
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.ComponentRenderer",
+        lambda: renderer,
+    )
+
+    dist_root = project.project_root / "dist"
+    client_dir = dist_root / "client"
+    public_dir = dist_root / "public"
+    client_dir.mkdir(parents=True, exist_ok=True)
+    public_dir.mkdir(parents=True, exist_ok=True)
+    (client_dir / "assets").mkdir(exist_ok=True)
+    (client_dir / "assets" / "bundle.js").write_text("console.log('prod');", encoding="utf-8")
+    (public_dir / "robots.txt").write_text("Prod robots", encoding="utf-8")
+
+    prod_settings = replace(project, debug=False, page_manifest={})
+
+    app = create_starlette_app(
+        prod_settings,
+        table,
+        public_static_dir=public_dir,
+        client_static_dir=client_dir,
+    )
+
+    assert getattr(app.state, "vite_proxy", None) is None
+    assert getattr(app.state, "overlay", None) is None
+
+    with TestClient(app) as client:
+        asset = client.get("/client/assets/bundle.js")
+        assert asset.status_code == 200
+        assert "prod" in asset.text
+
+        robots = client.get("/robots.txt")
+        assert robots.status_code == 200
+        assert "Prod robots" in robots.text
+
+
+def test_create_starlette_app_can_disable_static_mounts(
+    project: DevServerSettings,
+    monkeypatch,
+) -> None:
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    renderer = object()
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.ComponentRenderer",
+        lambda: renderer,
+    )
+
+    async def fake_build_page_response(*, request, settings, page, renderer, overlay=None):
+        return PlainTextResponse("page")
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.build_page_response",
+        fake_build_page_response,
+    )
+
+    (project.public_dir / "robots.txt").write_text("ok", encoding="utf-8")
+
+    app = create_starlette_app(project, table, serve_static=False)
+    client = TestClient(app)
+
+    response = client.get("/robots.txt")
+    assert response.status_code == 404
 
 def test_health_endpoints_reflect_readiness(project: DevServerSettings, monkeypatch) -> None:
     build_once(project)
