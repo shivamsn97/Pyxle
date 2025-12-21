@@ -10,6 +10,21 @@ Pyxle is a Python-first take on the Next.js mental model. Pages live in `pages/`
 4. **Predictable SSR** – A thin Node shim (`pyxle/ssr/render_component.mjs`) renders React components and streams the result back to Starlette.
 5. **No custom runtime contracts** – You are writing pure async Python (loaders) and React 18 function components (client).
 
+## Architecture at a glance
+
+```
+pages/*.pyx ──┐  compile_file()              ComponentRenderer      Browser
+			  ├─> server artifacts (.py) ──> Starlette routes ──┐   ▲
+			  └─> client artifacts (.jsx) ─► Vite dev server ──┼───┘
+													   ▲      │
+									 overlay + watcher└───────┘
+```
+
+- **Compiler** emits three artifacts per route (server module, client bundle stub, metadata).
+- **Dev server** mounts Starlette for loaders + APIs and proxies `/client/*` to Vite so React refresh stays instant.
+- **SSR runtime** shells out to Node to render components, injects head tags + global assets, and streams HTML back.
+- **Client runtime** hydrates the response, powers `<Link>`, and keeps the overlay connected for debug hints.
+
 ## Compare with Next.js
 
 | Concept | Next.js | Pyxle |
@@ -46,3 +61,24 @@ Open `pages/index.pyx`, edit the loader or JSX, and the dev server will rebuild,
 - Templates: `pyxle/templates/scaffold/`
 
 Use the [project structure guide](project-structure.md) to understand how these folders map to runtime behaviours.
+
+## Loader round-trip (request/response trace)
+
+```
+GET /projects HTTP/1.1
+Host: 127.0.0.1:8000
+Accept: text/html
+
+Starlette route ➜ import compiled server module ➜ call @server loader
+Loader returns {'projects': [...], 'timestamp': '...'}
+SSR renderer ➜ Node renders React component ➜ HTML streamed back
+
+HTTP/1.1 200 OK
+Content-Type: text/html; charset=utf-8
+Set-Cookie: pyxle-dev=1; SameSite=Lax
+
+<!doctype html>
+<html data-theme="dark">...
+```
+
+This is the same flow `pyxle serve` uses in production—the only difference is that `pyxle dev` also keeps Vite and the overlay websocket alive for instant feedback.

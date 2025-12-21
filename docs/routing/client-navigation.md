@@ -23,6 +23,33 @@ import { Link } from 'pyxle/client';
 - Set `replace` to avoid pushing to history.
 - External URLs (`href` starting with `http`) fall back to normal anchors.
 
+## Navigation request trace
+
+```
+# Browser prefetch triggered by <Link prefetch="hover">
+GET /projects HTTP/1.1
+Host: 127.0.0.1:8000
+Accept: application/json
+X-Pyxle-Navigation: 1
+
+→ Starlette detects header, skips full HTML template
+→ build_page_navigation_response() renders React component, captures head diff
+← HTTP/1.1 200 OK
+	 Content-Type: application/json
+
+{
+	"html": "<section data-route=\"/projects\">…",
+	"data": {"projects": [...]},
+	"head": {
+		"add": ["<title>Projects • Pyxle</title>"],
+		"remove": ["<title>Home • Pyxle</title>"]
+	},
+	"status": 200
+}
+
+# Router swaps DOM + metadata without reloading, then hydrates with cached data
+```
+
 ## Compare with Next.js
 
 - Similar to Next.js `next/link` + the app router's fetch cache. Pyxle does not have segments or partial renders yet, so each navigation fetches the full HTML/JSON payload for the destination page.

@@ -22,6 +22,24 @@ pyxle dev
 
 The dev server exposes Starlette on `http://<host>:<port>` (default `127.0.0.1:8000`) and proxies client asset requests to Vite at `http://<vite_host>:<vite_port>`.
 
+## Runtime wiring diagram
+
+```
+    file save                       HTTP request
+pages/ --------▶ Watchdog ──┐           from browser
+                 │                 │
+public/ -------▶ Watchdog ───┼─▶ build_once ───┼──▶ Starlette router ─▶ loader/SSR
+global styles/scripts ───────┘                 │
+                          └──▶ Vite proxy ─▶ Vite dev server
+
+Rebuild summary ─▶ Overlay websocket ─▶ Browser overlay UI
+```
+
+- **Watchdog** pushes debounced file lists into `build_once`, which recompiles changed `.pyx` files and syncs styles/scripts.
+- **Starlette** serves API + page routes straight from the freshly-written `.pyxle-build/server` directory.
+- **Vite proxy** only receives requests ending in `.js`, `.css`, `@vite/client`, etc., while everything else falls through to Starlette.
+- **Overlay manager** notifies browsers about rebuilds (`reload` events) or uncaught exceptions (`error` events).
+
 ## Builder highlights
 
 - Uses content hashes to skip unchanged files (`CachedSourceRecord`).
@@ -31,6 +49,28 @@ The dev server exposes Starlette on `http://<host>:<port>` (default `127.0.0.1:8
 ## Static assets
 
 `StaticAssetsMiddleware` (see `starlette_app.py`) serves `/public/*` and `/client/*` before hitting Starlette routes. In dev, `/client` proxies to Vite; in production it serves the built files under `dist/client`.
+
+### Sample request/response traces
+
+```
+# Page render
+GET /dashboard HTTP/1.1
+Host: 127.0.0.1:8000
+Accept: text/html
+X-Pyxle-Navigation: 0
+
+→ Starlette page route calls compiled loader
+→ ComponentRenderer shells out to Node
+← HTTP/1.1 200 OK + streamed HTML
+
+# Client asset (hot-reloaded)
+GET /client/pages/dashboard.jsx?t=123 HTTP/1.1
+Host: 127.0.0.1:8000
+Accept: text/javascript
+
+→ ViteProxy forwards to http://127.0.0.1:5173
+← HTTP/1.1 200 OK + JS module + HMR headers
+```
 
 ## Compare with Next.js
 
