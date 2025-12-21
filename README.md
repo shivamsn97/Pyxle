@@ -35,9 +35,9 @@ up your latest stylesheet without extra commands.
 
 The scaffold now mirrors a Next.js landing page: a single `.pyx` route renders a Tailwind-powered hero, feature cards, and quick-start commands with a built-in light/dark toggle. Branding assets (mark, wordmark, and grid pattern) live in `public/branding/`, Tailwind ships via `tailwind.config.cjs` + `postcss.config.cjs`, and the compiled stylesheet (`public/styles/tailwind.css`) is linked directly from the shared head so SSR answers are fully styled even when JavaScript is disabled. Run `npm run dev:css` alongside `pyxle dev` to keep the stylesheet fresh while editing.
 
-Prefer a narrative version? Follow the step-by-step guide in
-[`docs/walkthrough.md`](docs/walkthrough.md) to see the CLI, compiler, and dev
-server working together with screenshots and overlay tips.
+Prefer a narrative version? Follow the step-by-step guide that starts in
+[`docs/README.md`](docs/README.md) to see the CLI, compiler, and dev server
+working together with screenshots and overlay tips.
 
 ## Available Commands
 
@@ -120,7 +120,7 @@ Need faster subsequent builds? Append `--incremental` when re-running `pyxle bui
 
 `pyxle serve` automatically loads `dist/page-manifest.json`, mounts `dist/public` at `/`, exposes hashed bundles under `/client`, and starts the Starlette app with readiness probes enabled. Pass `--skip-build` when deploying prebuilt artifacts (for example, CI/CD pipelines that archive `dist/`).
 
-See [`docs/deployment.md`](docs/deployment.md) for the full checklist covering prerequisites, readiness probes, and CI recommendations.
+See [`docs/deployment/deployment.md`](docs/deployment/deployment.md) for the full checklist covering prerequisites, readiness probes, and CI recommendations.
 
 `pyxle build` prints the paths of every generated artifact upon completion:
 
@@ -178,7 +178,7 @@ New projects already ship with Tailwind, PostCSS, and the official forms & typog
 - `postcss.config.cjs` keeps Vite aware of the Tailwind + Autoprefixer plugins.
 - `pages/styles/tailwind.css` contains the `@tailwind` directives. Run `npm run dev:css` during development, and rely on `pyxle build` (or a manual `npm run build`) to execute the `build:css` script before Vite so every SSR response is fully styled.
 
-Need to extend the theme, add custom layers, or change the content globs? Follow the playbook in [`docs/tailwind.md`](docs/tailwind.md) for tips on overriding the defaults.
+Need to extend the theme, add custom layers, or change the content globs? Follow the playbook in [`docs/styling/tailwind.md`](docs/styling/tailwind.md) for tips on overriding the defaults.
 
 ## Development
 

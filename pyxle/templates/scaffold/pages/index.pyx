@@ -83,12 +83,12 @@ async def load_home(request):
                         {
                                 "title": "Tailwind guide",
                                 "description": "Customize the Tailwind theme or wire your own PostCSS build when you're ready.",
-                                "href": "https://github.com/shivamsn97/pyxle/blob/main/docs/tailwind.md",
+                                "href": "https://github.com/shivamsn97/pyxle/blob/main/docs/styling/tailwind.md",
                         },
                         {
                                 "title": "Deployment",
                                 "description": "Use pyxle build + pyxle serve to ship the same page with hashed assets.",
-                                "href": "https://github.com/shivamsn97/pyxle/blob/main/docs/deployment.md",
+                                "href": "https://github.com/shivamsn97/pyxle/blob/main/docs/deployment/deployment.md",
                         },
                 ],
                 "telemetry": {
