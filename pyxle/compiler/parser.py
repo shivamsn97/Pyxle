@@ -446,6 +446,11 @@ class PyxParser:
         head_is_dynamic = False
 
         for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "HEAD":
+                elements = []
+                head_is_dynamic = True
+                continue
+
             if not isinstance(node, ast.Assign):
                 continue
 

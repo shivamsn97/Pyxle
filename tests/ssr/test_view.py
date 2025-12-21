@@ -637,6 +637,55 @@ async def test_build_page_response_handles_head_error(settings: DevServerSetting
 
 
 @pytest.mark.anyio
+async def test_build_page_response_supports_callable_head(settings: DevServerSettings, tmp_path: Path) -> None:
+    server_module = tmp_path / "server" / "head_callable.py"
+    server_module.parent.mkdir(parents=True, exist_ok=True)
+    server_module.write_text(
+        """
+def HEAD(data):
+    product = data['product']
+    return [
+        f"<title>{product['name']} - Pyxle</title>",
+        f'<meta name="description" content="{product["description"]}" />',
+    ]
+
+async def load_home(request):
+    return {
+        'product': {
+            'name': 'Gizmo',
+            'description': 'Callable heads reuse loader data',
+        }
+    }
+""",
+        encoding="utf-8",
+    )
+
+    page = replace(
+        _page_route(tmp_path, loader_name="load_home"),
+        server_module_path=server_module,
+        head_elements=(),
+        head_is_dynamic=True,
+    )
+
+    renderer = StubRenderer()
+    renderer.responses.append(RenderResult(html="<main>callable</main>"))
+    request = Request({"type": "http", "http_version": "1.1", "method": "GET", "path": "/", "root_path": "", "headers": []})
+
+    response = await build_page_response(
+        request=request,
+        settings=settings,
+        page=page,
+        renderer=renderer,
+    )
+
+    body = (await _read_response_body(response)).decode()
+    assert response.status_code == 200
+    assert "<main>callable</main>" in body
+    assert "<title>Gizmo - Pyxle</title>" in body
+    assert 'content="Callable heads reuse loader data"' in body
+
+
+@pytest.mark.anyio
 async def test_build_page_navigation_response_handles_head_error(
     settings: DevServerSettings,
     tmp_path: Path,
@@ -768,7 +817,7 @@ def test_resolve_head_elements_returns_static(tmp_path: Path) -> None:
         head_is_dynamic=False,
     )
 
-    resolved = ssr_view._resolve_head_elements(page, module=None)
+    resolved = ssr_view._resolve_head_elements(page, module=None, loader_payload={})
 
     assert resolved == ("<title>Static</title>",)
 
@@ -782,7 +831,7 @@ def test_resolve_head_elements_reads_dynamic_module(tmp_path: Path) -> None:
 
     module = SimpleNamespace(HEAD=["<title>Dynamic</title>"])
 
-    resolved = ssr_view._resolve_head_elements(page, module)
+    resolved = ssr_view._resolve_head_elements(page, module, loader_payload={})
 
     assert resolved == ("<title>Dynamic</title>",)
 
@@ -796,7 +845,7 @@ def test_resolve_head_elements_handles_missing_head(tmp_path: Path) -> None:
 
     module = SimpleNamespace()
 
-    resolved = ssr_view._resolve_head_elements(page, module)
+    resolved = ssr_view._resolve_head_elements(page, module, loader_payload={})
 
     assert resolved == ()
 
@@ -811,4 +860,42 @@ def test_resolve_head_elements_validates_entries(tmp_path: Path) -> None:
     module = SimpleNamespace(HEAD=["<title>Ok</title>", 123])
 
     with pytest.raises(HeadEvaluationError):
-        ssr_view._resolve_head_elements(page, module)
+        ssr_view._resolve_head_elements(page, module, loader_payload={})
+
+
+def test_resolve_head_elements_invokes_callable_with_loader_data(tmp_path: Path) -> None:
+    page = replace(
+        _page_route(tmp_path, loader_name=None),
+        head_elements=(),
+        head_is_dynamic=True,
+    )
+
+    captured: dict[str, str] = {}
+
+    def build_head(data: dict[str, object]) -> str:
+        captured["title"] = f"{data['product']['name']}"
+        return f"<title>{data['product']['name']}</title>"
+
+    module = SimpleNamespace(HEAD=build_head)
+    loader_payload = {"product": {"name": "Callables"}}
+
+    resolved = ssr_view._resolve_head_elements(page, module, loader_payload)
+
+    assert resolved == ("<title>Callables</title>",)
+    assert captured["title"] == "Callables"
+
+
+def test_resolve_head_elements_callable_requires_data_argument(tmp_path: Path) -> None:
+    page = replace(
+        _page_route(tmp_path, loader_name=None),
+        head_elements=(),
+        head_is_dynamic=True,
+    )
+
+    def build_head_without_args() -> str:
+        return "<title>Invalid</title>"
+
+    module = SimpleNamespace(HEAD=build_head_without_args)
+
+    with pytest.raises(HeadEvaluationError):
+        ssr_view._resolve_head_elements(page, module, loader_payload={})

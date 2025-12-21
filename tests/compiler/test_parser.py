@@ -732,6 +732,26 @@ def test_parse_head_list_with_non_string_marks_dynamic(tmp_path: Path) -> None:
     assert result.head_is_dynamic is True
 
 
+def test_parse_head_function_marks_dynamic(tmp_path: Path) -> None:
+    content = dedent(
+        """
+        def HEAD(data):
+            return "<title>Callable</title>"
+
+        # --- JavaScript/PSX ---
+        export default function Demo() {
+            return <div />;
+        }
+        """
+    )
+
+    source = write(tmp_path, "pages/head_function.pyx", content)
+    result = PyxParser().parse(source)
+
+    assert result.head_elements == ()
+    assert result.head_is_dynamic is True
+
+
 def test_parse_head_skips_other_assignments(tmp_path: Path) -> None:
     content = dedent(
         """

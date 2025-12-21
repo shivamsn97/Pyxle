@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 import secrets
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Tuple
@@ -238,7 +239,11 @@ async def _execute_loader(
     return payload, status_code, module
 
 
-def _resolve_head_elements(page: PageRoute, module) -> tuple[str, ...]:
+def _resolve_head_elements(
+    page: PageRoute,
+    module,
+    loader_payload: Mapping[str, Any],
+) -> tuple[str, ...]:
     if not page.head_is_dynamic:
         return page.head_elements
 
@@ -249,22 +254,10 @@ def _resolve_head_elements(page: PageRoute, module) -> tuple[str, ...]:
     if head_value is None:
         return tuple()
 
-    if isinstance(head_value, str):
-        return (head_value,)
+    if callable(head_value):
+        head_value = _evaluate_head_callable(page, head_value, loader_payload)
 
-    if isinstance(head_value, (list, tuple)):
-        normalized: list[str] = []
-        for item in head_value:
-            if not isinstance(item, str):
-                raise HeadEvaluationError(
-                    f"HEAD entries for {page.path} must be strings; got {type(item).__name__}",
-                )
-            normalized.append(item)
-        return tuple(normalized)
-
-    raise HeadEvaluationError(
-        f"HEAD for {page.path} must be a string or list of strings; got {type(head_value).__name__}",
-    )
+    return _normalize_head_entries(page, head_value)
 
 
 def _normalize_loader_result(result: Any, page: PageRoute) -> Tuple[dict[str, Any], int]:
@@ -309,7 +302,7 @@ async def _create_page_artifacts(
         loader_breadcrumb["status"] = "passed"
         loader_breadcrumb["detail"] = f"Returned {len(loader_props)} key(s) with status {status_code}"
 
-    head_elements = _resolve_head_elements(page, module)
+    head_elements = _resolve_head_elements(page, module, loader_props)
     component_props = _compose_component_props(loader_props)
     render_result = await renderer.render(page.client_module_path, component_props)
     body_html = render_result.html
@@ -402,6 +395,48 @@ def _purge_page_modules(pages_dir: Path) -> None:
     importlib.invalidate_caches()
     for name in removed:
         sys.modules.pop(name, None)
+
+
+def _evaluate_head_callable(
+    page: PageRoute,
+    head_callable: Callable[[Mapping[str, Any]], object],
+    loader_payload: Mapping[str, Any],
+) -> Any:
+    try:
+        value = head_callable(loader_payload)
+    except TypeError as exc:
+        raise HeadEvaluationError(
+            f"Callable HEAD for {page.path} must accept exactly one argument (loader data)",
+        ) from exc
+
+    if inspect.isawaitable(value):
+        raise HeadEvaluationError(
+            f"Callable HEAD for {page.path} must return synchronously",
+        )
+
+    return value
+
+
+def _normalize_head_entries(page: PageRoute, value: Any) -> tuple[str, ...]:
+    if value is None:
+        return tuple()
+
+    if isinstance(value, str):
+        return (value,)
+
+    if isinstance(value, (list, tuple)):
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                raise HeadEvaluationError(
+                    f"HEAD entries for {page.path} must be strings; got {type(item).__name__}",
+                )
+            normalized.append(item)
+        return tuple(normalized)
+
+    raise HeadEvaluationError(
+        f"HEAD for {page.path} must be a string, list of strings, or callable; got {type(value).__name__}",
+    )
 
 
 __all__ = [

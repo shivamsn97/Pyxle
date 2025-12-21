@@ -50,5 +50,11 @@ def HEAD(data):
 
 Returning a callable lets you reuse loader data instead of recomputing API calls.
 
+#### Callable contract
+
+- Pyxle passes the loader payload (`dict`) as the first (and only) argument.
+- Return a string or list/tuple of strings synchronously; async callables are rejected so SSR stays deterministic.
+- Return `None` to clear page-specific head tags.
+
 ---
 **Navigation:** [← Previous](index.md) | [Next →](pyxle-client.md)
