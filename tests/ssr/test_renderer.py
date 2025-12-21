@@ -12,6 +12,7 @@ import pyxle.ssr.renderer as renderer_module
 from pyxle.ssr.renderer import (
     ComponentRenderer,
     ComponentRenderError,
+    RenderResult,
     _derive_project_paths,
     _format_node_error,
     _parse_runtime_output,
@@ -32,7 +33,7 @@ async def test_renderer_caches_component(tmp_path: Path) -> None:
         calls.append(path)
 
         async def render(props):
-            return f"rendered:{props['value']}"
+            return RenderResult(html=f"rendered:{props['value']}")
 
         return render
 
@@ -44,8 +45,8 @@ async def test_renderer_caches_component(tmp_path: Path) -> None:
     first = await renderer.render(component, {"value": "a"})
     second = await renderer.render(component, {"value": "a"})
 
-    assert first == "rendered:a"
-    assert second == "rendered:a"
+    assert first.html == "rendered:a"
+    assert second.html == "rendered:a"
     assert calls == [component.resolve()]
 
 
@@ -66,7 +67,7 @@ async def test_renderer_deduplicates_concurrent_factory_invocations(tmp_path: Pa
         await allow_finish.wait()
 
         async def render(props):
-            return "ok"
+            return RenderResult(html="ok")
 
         return render
 
@@ -81,8 +82,8 @@ async def test_renderer_deduplicates_concurrent_factory_invocations(tmp_path: Pa
     await asyncio.sleep(0)
     allow_finish.set()
 
-    assert await first == "ok"
-    assert await second == "ok"
+    assert (await first).html == "ok"
+    assert (await second).html == "ok"
     assert factory_calls == 1
 
 
@@ -99,7 +100,7 @@ async def test_renderer_supports_sync_factory(tmp_path: Path) -> None:
 
     renderer = ComponentRenderer(factory=factory)
     result = await renderer.render(component, {"value": "42"})
-    assert result == "sync:42"
+    assert result.html == "sync:42"
 
 
 @pytest.mark.anyio
@@ -108,10 +109,18 @@ async def test_renderer_default_factory_produces_html(tmp_path: Path) -> None:
     project_root = tmp_path / "project"
     component = project_root / ".pyxle-build" / "client" / "pages" / "fallback.jsx"
     component.parent.mkdir(parents=True, exist_ok=True)
+    stylesheet = component.parent / "styles" / "fallback.css"
+    stylesheet.parent.mkdir(parents=True, exist_ok=True)
+    stylesheet.write_text(
+        ".hero { color: red; }\n",
+        encoding="utf-8",
+    )
+
     component.write_text(
         dedent(
             """
             import React from 'react';
+            import './styles/fallback.css';
 
             export default function Fallback({ count }) {
                 return <section data-count={count}>Count: {count}</section>;
@@ -127,10 +136,15 @@ async def test_renderer_default_factory_produces_html(tmp_path: Path) -> None:
     renderer = ComponentRenderer()
     result = await renderer.render(component, {"count": 3})
 
-    assert "<section" in result
-    assert "data-count=\"3\"" in result
-    assert "Count:" in result
-    assert "3</section>" in result
+    assert "<section" in result.html
+    assert "data-count=\"3\"" in result.html
+    assert "Count:" in result.html
+    assert "3</section>" in result.html
+    assert result.inline_styles
+    inline_style = result.inline_styles[0]
+    assert inline_style.contents.strip().startswith(".hero")
+    assert inline_style.identifier.startswith("pyxle-inline-style-")
+    assert inline_style.source and inline_style.source.endswith("styles/fallback.css")
 
 
 @pytest.mark.anyio
@@ -186,13 +200,13 @@ async def test_default_factory_invokes_runtime(monkeypatch: pytest.MonkeyPatch, 
             self.path = path
 
         def render(self, props: dict[str, object]) -> str:
-            return f"rendered:{props['value']}:{self.path.name}"
+            return RenderResult(html=f"rendered:{props['value']}:{self.path.name}")
 
     monkeypatch.setattr(renderer_module, "_NodeComponentRuntime", FakeRuntime)
 
     render_fn = renderer_module._default_factory(component)
     result = await render_fn({"value": "ok"})
-    assert result == "rendered:ok:demo.jsx"
+    assert result.html == "rendered:ok:demo.jsx"
 
 
 def test_parse_runtime_output_invalid_json() -> None:
@@ -215,6 +229,24 @@ def test_parse_runtime_output_invalid_snippet_raises() -> None:
     noisy = "log output {\"ok\": false"
     with pytest.raises(ComponentRenderError):
         _parse_runtime_output(noisy)
+
+
+def test_parse_inline_styles_handles_non_list_payload() -> None:
+    assert renderer_module._parse_inline_styles({}) == ()
+
+
+def test_parse_inline_styles_filters_invalid_entries() -> None:
+    payload = [
+        {"identifier": "ok", "contents": "body", "source": 123},
+        {"identifier": None, "contents": "missing"},
+        "not-a-dict",
+    ]
+    fragments = renderer_module._parse_inline_styles(payload)
+    assert len(fragments) == 1
+    fragment = fragments[0]
+    assert fragment.identifier == "ok"
+    assert fragment.contents == "body"
+    assert fragment.source is None
 
 
 def test_format_node_error_prefers_json_message() -> None:
@@ -298,7 +330,10 @@ def test_node_runtime_success_returns_html(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(renderer_module.subprocess, "run", lambda *args, **kwargs: DummyProcess())
 
     runtime = renderer_module._NodeComponentRuntime(component)
-    assert runtime.render({}) == "<section>ok</section>"
+    result = runtime.render({})
+    assert isinstance(result, RenderResult)
+    assert result.html == "<section>ok</section>"
+    assert result.inline_styles == ()
 
 
 def test_node_runtime_payload_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

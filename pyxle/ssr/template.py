@@ -11,6 +11,8 @@ from pyxle.devserver.routes import PageRoute
 from pyxle.devserver.settings import DevServerSettings
 from pyxle.devserver.styles import load_inline_stylesheets
 
+from .renderer import InlineStyleFragment
+
 
 @dataclass(frozen=True)
 class DocumentShell:
@@ -32,6 +34,7 @@ def render_document(
   props: dict[str, Any],
   script_nonce: str,
   head_elements: tuple[str, ...],
+  inline_styles: tuple[InlineStyleFragment, ...] = tuple(),
 ) -> str:
   """Compose the HTML document for a rendered page."""
   try:
@@ -41,6 +44,7 @@ def render_document(
       props=props,
       script_nonce=script_nonce,
       head_elements=head_elements,
+      inline_styles=inline_styles,
     )
   except ManifestLookupError:
     return _render_manifest_error(page)
@@ -54,6 +58,7 @@ def build_document_shell(
   props: dict[str, Any],
   script_nonce: str,
   head_elements: tuple[str, ...],
+  inline_styles: tuple[InlineStyleFragment, ...] = tuple(),
 ) -> DocumentShell:
   props_payload = _serialize_props(props)
   page_path_literal = json.dumps(page.client_asset_path)
@@ -65,6 +70,7 @@ def build_document_shell(
   )
   nonce_attr = _format_nonce_attr(script_nonce)
   global_styles = _render_global_styles_markup(settings)
+  inline_styles_markup = _render_inline_styles_markup(inline_styles)
 
   if not settings.debug and settings.page_manifest is not None:
     manifest_entry = settings.page_manifest.get(page.path)
@@ -89,12 +95,13 @@ def build_document_shell(
 <html lang=\"en\">
   <head>
   <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />{css_html}{global_styles}{head_block}
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />{css_html}{global_styles}{inline_styles_markup}{head_block}
   </head>
   <body>
   <div id=\"root\">""".format(
       css_html=css_html,
       global_styles=global_styles,
+      inline_styles_markup=inline_styles_markup,
       head_block=head_block,
     )
     suffix = """
@@ -119,7 +126,7 @@ def build_document_shell(
   <head>
   <meta charset=\"utf-8\" />
   <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <script type=\"module\" src=\"{vite_origin}/@vite/client\"{nonce_attr}></script>{react_refresh_preamble}{global_styles}{head_block}
+  <script type=\"module\" src=\"{vite_origin}/@vite/client\"{nonce_attr}></script>{react_refresh_preamble}{global_styles}{inline_styles_markup}{head_block}
   </head>
   <body>
   <div id=\"root\">""".format(
@@ -127,6 +134,7 @@ def build_document_shell(
     nonce_attr=nonce_attr,
     react_refresh_preamble=react_refresh_preamble,
     global_styles=global_styles,
+    inline_styles_markup=inline_styles_markup,
     head_block=head_block,
   )
   suffix = """
@@ -297,6 +305,27 @@ def _escape_style_contents(value: str) -> str:
   if not value:
     return ""
   return value.replace("</", "<\\/")
+
+
+def _render_inline_styles_markup(styles: tuple[InlineStyleFragment, ...]) -> str:
+  if not styles:
+    return ""
+  fragments: list[str] = []
+  seen: set[str] = set()
+  for style in styles:
+    identifier = style.identifier
+    if identifier in seen:
+      continue
+    seen.add(identifier)
+    escaped_id = escape(identifier, quote=True)
+    escaped_source = ""
+    if style.source:
+      escaped_source = f' data-pyxle-inline-source="{escape(style.source, quote=True)}"'
+    escaped_contents = _escape_style_contents(style.contents)
+    fragments.append(
+      f"\n  <style data-pyxle-inline-style=\"{escaped_id}\"{escaped_source}>{escaped_contents}</style>"
+    )
+  return "".join(fragments)
 
 __all__ = [
   "DocumentShell",

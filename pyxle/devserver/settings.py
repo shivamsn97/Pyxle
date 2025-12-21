@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Sequence
 
+from .scripts import GlobalScript, resolve_global_scripts
 from .styles import GlobalStylesheet, resolve_global_stylesheets
 
 
@@ -37,6 +38,7 @@ class DevServerSettings:
     # Optional: loaded page manifest for production asset resolution
     page_manifest: dict[str, Any] | None = None
     global_stylesheets: tuple[GlobalStylesheet, ...] = ()
+    global_scripts: tuple[GlobalScript, ...] = ()
 
     @classmethod
     def from_project_root(
@@ -56,6 +58,7 @@ class DevServerSettings:
         api_route_hooks: tuple[str, ...] | list[str] | None = None,
         page_manifest: dict[str, Any] | None = None,
         global_stylesheets: Sequence[str] | Sequence[GlobalStylesheet] | None = None,
+        global_scripts: Sequence[str] | Sequence[GlobalScript] | None = None,
     ) -> "DevServerSettings":
         """Create settings derived from a project root directory."""
 
@@ -77,6 +80,18 @@ class DevServerSettings:
                     style_specs = (first, *iterator)  # type: ignore[arg-type]
                 else:
                     style_specs = resolve_global_stylesheets(root, global_stylesheets)  # type: ignore[arg-type]
+        script_specs: tuple[GlobalScript, ...] = ()
+        if global_scripts:
+            iterator = iter(global_scripts)
+            try:
+                first_script = next(iterator)
+            except StopIteration:
+                script_specs = ()
+            else:
+                if isinstance(first_script, GlobalScript):  # type: ignore[arg-type]
+                    script_specs = (first_script, *iterator)  # type: ignore[arg-type]
+                else:
+                    script_specs = resolve_global_scripts(root, global_scripts)  # type: ignore[arg-type]
         return cls(
             project_root=root,
             build_root=build_root_path,
@@ -95,6 +110,7 @@ class DevServerSettings:
             api_route_hooks=api_hook_specs,
             page_manifest=page_manifest,
             global_stylesheets=style_specs,
+            global_scripts=script_specs,
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -118,4 +134,5 @@ class DevServerSettings:
             "api_route_hooks": list(self.api_route_hooks),
             "page_manifest_loaded": self.page_manifest is not None,
             "global_stylesheets": [sheet.as_dict() for sheet in self.global_stylesheets],
+            "global_scripts": [script.as_dict() for script in self.global_scripts],
         }

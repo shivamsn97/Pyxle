@@ -11,7 +11,9 @@ from pyxle.devserver import DevServer
 from pyxle.devserver.builder import BuildSummary
 from pyxle.devserver.registry import MetadataRegistry
 from pyxle.devserver.routes import RouteTable
+from pyxle.devserver.scripts import resolve_global_scripts
 from pyxle.devserver.settings import DevServerSettings
+from pyxle.devserver.styles import resolve_global_stylesheets
 from pyxle.devserver.watcher import WatcherStatistics
 
 
@@ -78,6 +80,30 @@ def test_settings_to_dict_round_trip(tmp_path: Path) -> None:
     assert payload["custom_middlewares"] == []
     assert payload["page_route_hooks"] == []
     assert payload["api_route_hooks"] == []
+
+
+def test_settings_accept_pre_resolved_global_assets(tmp_path: Path) -> None:
+    root = tmp_path / "assets-project"
+    (root / "pages").mkdir(parents=True)
+    (root / "public").mkdir()
+    style_path = root / "styles" / "global.css"
+    style_path.parent.mkdir(parents=True, exist_ok=True)
+    style_path.write_text("body { color: black; }\n", encoding="utf-8")
+    script_path = root / "scripts" / "analytics.js"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text("console.log('analytics');\n", encoding="utf-8")
+
+    styles = resolve_global_stylesheets(root, ("styles/global.css",))
+    scripts = resolve_global_scripts(root, ("scripts/analytics.js",))
+
+    settings = DevServerSettings.from_project_root(
+        root,
+        global_stylesheets=styles,
+        global_scripts=scripts,
+    )
+
+    assert settings.global_stylesheets == styles
+    assert settings.global_scripts == scripts
 
 
 @pytest.mark.parametrize("project_root", [".", Path(".")])

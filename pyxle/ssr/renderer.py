@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Tuple, TypeVar
 
@@ -15,7 +16,25 @@ class ComponentRenderError(RuntimeError):
     """Raised when a component cannot be rendered server-side."""
 
 
-_RenderCallable = Callable[[Dict[str, Any]], Awaitable[str] | str]
+@dataclass(frozen=True)
+class InlineStyleFragment:
+    """Inline CSS artifact emitted by the SSR runtime."""
+
+    identifier: str
+    contents: str
+    source: str | None = None
+
+
+@dataclass(frozen=True)
+class RenderResult:
+    """Normalized payload returned by component renderers."""
+
+    html: str
+    inline_styles: tuple[InlineStyleFragment, ...] = ()
+
+
+RenderOutput = RenderResult | str
+_RenderCallable = Callable[[Dict[str, Any]], Awaitable[RenderOutput] | RenderOutput]
 _FactoryReturn = Awaitable[_RenderCallable] | _RenderCallable
 _RenderFactory = Callable[[Path], _FactoryReturn]
 
@@ -41,7 +60,7 @@ class ComponentRenderer:
         self._lock = asyncio.Lock()
         self._generation = 0
 
-    async def render(self, component_path: Path, props: Dict[str, Any]) -> str:
+    async def render(self, component_path: Path, props: Dict[str, Any]) -> RenderResult:
         """Render ``component_path`` with the provided props."""
 
         resolved = component_path.resolve()
@@ -57,7 +76,8 @@ class ComponentRenderer:
 
         _, render_fn = cached
         result = render_fn(props)
-        return await _ensure_awaitable(result)
+        resolved = await _ensure_awaitable(result)
+        return _normalize_render_output(resolved)
 
     def clear(self) -> None:
         """Drop all cached component renderers."""
@@ -69,7 +89,7 @@ class ComponentRenderer:
 def _default_factory(component_path: Path) -> _RenderCallable:
     runtime = _NodeComponentRuntime(component_path)
 
-    async def _render(props: Dict[str, Any]) -> str:
+    async def _render(props: Dict[str, Any]) -> RenderResult:
         return await asyncio.to_thread(runtime.render, props)
 
     return _render
@@ -82,7 +102,7 @@ class _NodeComponentRuntime:
         self._node_executable = _resolve_node_executable()
         self._runtime_script = _resolve_runtime_script()
 
-    def render(self, props: Dict[str, Any]) -> str:
+    def render(self, props: Dict[str, Any]) -> RenderResult:
         try:
             serialized_props = json.dumps(props, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError) as exc:
@@ -125,7 +145,9 @@ class _NodeComponentRuntime:
         if not isinstance(html, str):
             raise ComponentRenderError("SSR runtime returned malformed HTML payload")
 
-        return html
+        inline_styles = _parse_inline_styles(payload.get("styles"))
+
+        return RenderResult(html=html, inline_styles=inline_styles)
 
 
 def _parse_runtime_output(raw: str) -> dict[str, Any]:
@@ -184,5 +206,42 @@ def _resolve_runtime_script() -> Path:
         raise ComponentRenderError("SSR runtime script is missing from the installation")
     return script_path
 
+def _normalize_render_output(value: RenderOutput) -> RenderResult:
+    if isinstance(value, RenderResult):
+        return value
+    if isinstance(value, str):
+        return RenderResult(html=value)
+    raise ComponentRenderError("Renderer returned unsupported payload type")
 
-__all__ = ["ComponentRenderError", "ComponentRenderer"]
+
+def _parse_inline_styles(raw: Any) -> tuple[InlineStyleFragment, ...]:
+    if not isinstance(raw, list):
+        return ()
+
+    fragments: list[InlineStyleFragment] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        identifier = entry.get("identifier")
+        contents = entry.get("contents")
+        source = entry.get("source")
+        if not isinstance(identifier, str) or not isinstance(contents, str):
+            continue
+        if source is not None and not isinstance(source, str):
+            source = None
+        fragments.append(
+            InlineStyleFragment(
+                identifier=identifier,
+                contents=contents,
+                source=source,
+            )
+        )
+    return tuple(fragments)
+
+
+__all__ = [
+    "ComponentRenderError",
+    "ComponentRenderer",
+    "InlineStyleFragment",
+    "RenderResult",
+]

@@ -1,4 +1,5 @@
 import { Console } from 'node:console';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -28,6 +29,8 @@ async function render() {
   if (!projectRoot) {
     throw new Error('Unable to determine project root for SSR runtime.');
   }
+  const styleRegistry = createStyleRegistry(projectRoot);
+  globalThis.__PYXLE_REGISTER_SSR_STYLE__ = (entry) => styleRegistry.register(entry);
   const projectRequire = createProjectRequire(projectRoot);
   const esbuild = loadDependency('esbuild', projectRequire, projectRoot);
   const React = loadDependency('react', projectRequire, projectRoot);
@@ -65,10 +68,27 @@ async function render() {
             });
           },
         },
+        {
+          name: 'pyxle-inline-css',
+          setup(build) {
+            build.onLoad({ filter: /\.css$/ }, async (args) => {
+              const contents = await fs.promises.readFile(args.path, 'utf8');
+              const descriptor = styleRegistry.describe(args.path, contents);
+              const moduleCode = `const entry = ${JSON.stringify(descriptor)};
+if (typeof globalThis.__PYXLE_REGISTER_SSR_STYLE__ === 'function') {
+  globalThis.__PYXLE_REGISTER_SSR_STYLE__(entry);
+}
+export default entry.contents;
+`;
+              return {
+                contents: moduleCode,
+                loader: 'js',
+                resolveDir: path.dirname(args.path),
+              };
+            });
+          },
+        },
       ],
-      loader: {
-        '.css': 'text',
-      },
       external: REACT_EXTERNALS,
     });
 
@@ -82,7 +102,8 @@ async function render() {
 
     const element = React.createElement(Component, props);
     const html = ReactDOMServer.renderToString(element);
-    process.stdout.write(JSON.stringify({ ok: true, html }));
+    const styles = styleRegistry.list();
+    process.stdout.write(JSON.stringify({ ok: true, html, styles }));
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
@@ -165,4 +186,50 @@ function redirectConsoleToStderr() {
       console[method] = (...args) => redirected[method](...args);
     }
   }
+}
+
+function createStyleRegistry(projectRoot) {
+  const map = new Map();
+
+  return {
+    register(entry) {
+      if (!entry || typeof entry !== 'object') {
+        return;
+      }
+      const { identifier } = entry;
+      if (typeof identifier !== 'string' || map.has(identifier)) {
+        return;
+      }
+      map.set(identifier, entry);
+    },
+    describe(filePath, contents) {
+      const source = normalizeStyleSource(filePath, projectRoot);
+      return {
+        identifier: makeStyleIdentifier(source),
+        source,
+        contents,
+      };
+    },
+    list() {
+      return Array.from(map.values());
+    },
+  };
+}
+
+function normalizeStyleSource(filePath, projectRoot) {
+  const absolute = path.resolve(filePath);
+  if (projectRoot) {
+    const relative = path.relative(projectRoot, absolute);
+    if (!relative.startsWith('..') && !path.isAbsolute(relative)) {
+      return relative.split(path.sep).join('/');
+    }
+  }
+  return path.basename(filePath);
+}
+
+function makeStyleIdentifier(source) {
+  const base = typeof source === 'string' && source ? source : 'style';
+  const digest = crypto.createHash('sha1').update(base).digest('hex').slice(0, 12);
+  const safe = base.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'style';
+  return `pyxle-inline-style-${safe}-${digest}`;
 }

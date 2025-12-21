@@ -124,6 +124,7 @@ class DevServer:
         total_api_copied = len(summary.copied_api_modules)
         total_assets = len(summary.copied_client_assets)
         total_styles = len(summary.synced_stylesheets)
+        total_scripts = len(summary.synced_scripts)
         total_removed = len(summary.removed)
 
         if summary.any_changes():
@@ -132,6 +133,7 @@ class DevServer:
                 f"{total_api_copied} API module(s) copied",
                 f"{total_assets} client asset(s) copied",
                 f"{total_styles} global stylesheet(s) synced",
+                f"{total_scripts} global script(s) synced",
                 f"{total_removed} artifact(s) removed",
             ]
             message = "; ".join(parts)

@@ -563,12 +563,14 @@ def _render_slot_runtime_types() -> str:
 
 def _render_client_entry(settings: DevServerSettings) -> str:
     content = (
-        dedent(
-            """
-            import React from 'react';
-            import ReactDOM from 'react-dom/client';
+      dedent(
+        """
+        __PYXLE_GLOBAL_SCRIPT_IMPORTS__
+        import React from 'react';
+        import ReactDOM from 'react-dom/client';
+        __PYXLE_GLOBAL_STYLE_IMPORTS__
 
-            const componentModules = {
+        const componentModules = {
               ...import.meta.glob('/pages/**/*.jsx'),
               ...import.meta.glob('/routes/**/*.jsx'),
             };
@@ -1398,12 +1400,17 @@ def _render_client_entry(settings: DevServerSettings) -> str:
         content = content.replace("__PYXLE_OVERLAY_BLOCK__", "", 1)
         content = content.replace("__PYXLE_OVERLAY_BOOTSTRAP__", "", 1)
 
+    script_block = ""
+    if settings.global_scripts:
+      script_lines = [f"import '{script.import_specifier}';" for script in settings.global_scripts]
+      script_block = "\n".join(script_lines) + "\n"
+    content = content.replace("__PYXLE_GLOBAL_SCRIPT_IMPORTS__\n", script_block, 1)
+
+    style_block = ""
     if settings.global_stylesheets:
-        style_lines = [f"import '{sheet.import_specifier}';" for sheet in settings.global_stylesheets]
-        style_block = "\n".join(style_lines) + "\n"
-        marker = "import ReactDOM from 'react-dom/client';\n\n"
-        replacement = f"import ReactDOM from 'react-dom/client';\n{style_block}\n"
-        content = content.replace(marker, replacement, 1)
+      style_lines = [f"import '{sheet.import_specifier}';" for sheet in settings.global_stylesheets]
+      style_block = "\n".join(style_lines) + "\n"
+    content = content.replace("__PYXLE_GLOBAL_STYLE_IMPORTS__\n", style_block, 1)
     return content
 
 

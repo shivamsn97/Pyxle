@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from .jsx_imports import rewrite_pyx_import_specifiers
 from .model import CompilationResult, PageMetadata
 from .parser import PyxParseResult
 
@@ -48,12 +49,13 @@ class ArtifactWriter:
             else _STATIC_STUB
         )
         if parse_result.loader and python_code.strip():
-            python_code = _ensure_server_import(python_code)
+            python_code = ensure_server_import(python_code)
         jsx_code = (
             parse_result.jsx_code
             if parse_result.jsx_code.strip()
             else _JSX_STUB
         )
+        jsx_code, _ = rewrite_pyx_import_specifiers(jsx_code)
 
         server_output.write_text(python_code, encoding="utf-8")
         client_output.write_text(jsx_code, encoding="utf-8")
@@ -85,9 +87,9 @@ class ArtifactWriter:
         )
 
 
-def _ensure_server_import(source: str) -> str:
+def ensure_server_import(source: str, *, return_insert_position: bool = False) -> str | tuple[str, int | None]:
     if not source.strip():
-        return source
+        return (source, None) if return_insert_position else source
 
     try:
         module = ast.parse(source, mode="exec", type_comments=True)
@@ -95,7 +97,7 @@ def _ensure_server_import(source: str) -> str:
         module = None
 
     if module is not None and not _needs_server_import(module):
-        return source
+        return (source, None) if return_insert_position else source
 
     lines = source.splitlines()
     insert_at = _determine_server_import_index(lines, module)
@@ -104,6 +106,8 @@ def _ensure_server_import(source: str) -> str:
     result = "\n".join(lines)
     if source.endswith("\n"):
         result += "\n"
+    if return_insert_position:
+        return result, insert_at
     return result
 
 

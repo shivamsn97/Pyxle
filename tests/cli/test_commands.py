@@ -14,6 +14,7 @@ import pyxle.cli as cli
 from pyxle import __version__
 from pyxle.cli import app, version_callback
 from pyxle.cli.assets import default_favicon_bytes
+from pyxle.config import PyxleConfig
 
 runner = CliRunner()
 
@@ -919,3 +920,18 @@ def test_compile_command_surfaces_compiler_failure() -> None:
         result = runner.invoke(app, ["compile", str(source_file)], catch_exceptions=False)
         assert result.exit_code == 1
         assert "Compilation failed" in result.stdout
+
+
+def test_resolve_global_script_entries_deduplicates(tmp_path: Path) -> None:
+    config = PyxleConfig(
+        global_scripts=(
+            " scripts/track.js ",
+            "",
+            "scripts/track.js",
+            "scripts/analytics.js",
+        )
+    )
+
+    result = cli._resolve_global_script_entries(tmp_path, config)
+
+    assert result == ("scripts/track.js", "scripts/analytics.js")

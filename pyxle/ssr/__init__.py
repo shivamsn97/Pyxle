@@ -13,6 +13,8 @@ if TYPE_CHECKING:  # pragma: no cover - import-time helpers
 __all__ = [
     "ComponentRenderError",
     "ComponentRenderer",
+    "InlineStyleFragment",
+    "RenderResult",
     "render_document",
     "render_error_document",
     "build_page_response",
@@ -21,7 +23,7 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:  # pragma: no cover - module-level indirection
-    if name in {"ComponentRenderer", "ComponentRenderError"}:
+    if name in {"ComponentRenderer", "ComponentRenderError", "InlineStyleFragment", "RenderResult"}:
         module = import_module(".renderer", __name__)
         return getattr(module, name)
     if name in {"render_document", "render_error_document"}:

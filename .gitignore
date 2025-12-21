@@ -1,4 +1,5 @@
 .pyxle-node-cache/
+.pyxle/.lang-virtual/
 node_modules/
 test-app/
 .pyxle-build

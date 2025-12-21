@@ -19,6 +19,7 @@ from .build import (
 from .client_files import write_client_bootstrap_files
 from .layouts import compose_layout_templates
 from .scanner import SourceKind, scan_source_tree
+from .scripts import sync_global_scripts
 from .settings import DevServerSettings
 from .styles import sync_global_stylesheets
 
@@ -31,6 +32,7 @@ class BuildSummary:
     copied_api_modules: list[str] = field(default_factory=list)
     copied_client_assets: list[str] = field(default_factory=list)
     synced_stylesheets: list[str] = field(default_factory=list)
+    synced_scripts: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     removed: list[str] = field(default_factory=list)
 
@@ -40,6 +42,7 @@ class BuildSummary:
             or self.copied_api_modules
             or self.copied_client_assets
             or self.synced_stylesheets
+            or self.synced_scripts
             or self.removed
         )
 
@@ -110,6 +113,12 @@ def build_once(settings: DevServerSettings, *, force_rebuild: bool = False) -> B
             client_root=paths.client_root,
         )
         summary.synced_stylesheets.extend(updated_styles)
+    if settings.global_scripts:
+        updated_scripts = sync_global_scripts(
+            settings.global_scripts,
+            client_root=paths.client_root,
+        )
+        summary.synced_scripts.extend(updated_scripts)
     write_client_bootstrap_files(settings)
 
     return summary

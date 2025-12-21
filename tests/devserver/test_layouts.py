@@ -45,6 +45,9 @@ def test_compose_layout_templates_generates_wrapped_module(tmp_path: Path) -> No
     assert "SlotProvider" in composed_source
     assert "kind: 'layout'" in composed_source
     assert "kind: 'template'" in composed_source
+    assert "function getModuleExport" in composed_source
+    assert "PageModule?.slots" not in composed_source
+    assert "getModuleExport(PageModule, 'slots')" in composed_source
 
     payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     assert payload["client_path"] == "/routes/blog/post.jsx"
@@ -52,6 +55,30 @@ def test_compose_layout_templates_generates_wrapped_module(tmp_path: Path) -> No
         {"kind": "layout", "client_path": "/pages/layout.jsx"},
         {"kind": "template", "client_path": "/pages/blog/template.jsx"},
     ]
+
+
+def test_compose_layout_templates_handles_pages_without_slots(tmp_path: Path) -> None:
+    settings = create_project(tmp_path)
+
+    write(
+        settings.pages_dir / "layout.pyx",
+        "import React from 'react';\nexport default function Layout({ children }) { return <div>{children}</div>; }\n",
+    )
+    write(
+        settings.pages_dir / "blog" / "post.pyx",
+        "import React from 'react';\n\nexport default function BlogPost() {\n    return <article>Post</article>;\n}\n",
+    )
+
+    build_once(settings, force_rebuild=True)
+
+    composed_path = settings.client_build_dir / "routes" / "blog" / "post.jsx"
+    assert composed_path.exists()
+    composed_source = composed_path.read_text(encoding="utf-8")
+
+    assert "PageModule?.slots" not in composed_source
+    assert "PageModule?.createSlots" not in composed_source
+    assert "getModuleExport(PageModule, 'slots')" in composed_source
+    assert "getModuleExport(PageModule, 'createSlots')" in composed_source
 
 
 def test_compose_layout_templates_removes_wrappers_when_no_files(tmp_path: Path) -> None:

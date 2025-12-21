@@ -179,3 +179,35 @@ def test_build_once_syncs_global_stylesheets(tmp_path: Path) -> None:
     summary = build_once(settings)
     assert summary.synced_stylesheets == ["styles/global.css"]
     assert "#111" in generated.read_text(encoding="utf-8")
+
+
+def test_build_once_syncs_global_scripts(tmp_path: Path) -> None:
+    root = tmp_path / "scripted"
+    (root / "pages").mkdir(parents=True)
+    (root / "public").mkdir()
+    write_file(
+        root / "pages" / "index.pyx",
+        "import React from 'react';\n\nexport default function Home() {\n  return <div>Home</div>;\n}\n",
+    )
+    script_path = root / "scripts" / "analytics.js"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text("console.log('analytics');\n", encoding="utf-8")
+
+    settings = DevServerSettings.from_project_root(
+        root,
+        global_scripts=("scripts/analytics.js",),
+    )
+
+    summary = build_once(settings)
+    assert summary.synced_scripts == ["scripts/analytics.js"]
+    generated = settings.client_build_dir / settings.global_scripts[0].client_relative_path
+    assert generated.exists()
+    assert "analytics" in generated.read_text(encoding="utf-8")
+
+    summary = build_once(settings)
+    assert summary.synced_scripts == []
+
+    script_path.write_text("console.log('updated');\n", encoding="utf-8")
+    summary = build_once(settings)
+    assert summary.synced_scripts == ["scripts/analytics.js"]
+    assert "updated" in generated.read_text(encoding="utf-8")

@@ -32,16 +32,24 @@ dev = [
   "coverage>=7.4,<8.0",
   "ruff>=0.6,<0.7"
 ]
+langkit = [
+  "pygls>=1.3,<2.0",
+  "lsprotocol>=2023.0.0",
+  "pyflakes>=3.2,<3.3"
+]
 
 [project.scripts]
 pyxle = "pyxle.cli:app"
+pyxle-langkit = "pyxle_langkit.cli:app"
+pyxle-langserver = "pyxle_langkit.lsp:main"
 
 [tool.hatch.metadata]
 allow-direct-references = true
 
 [tool.hatch.build]
 include = [
-  "pyxle/templates"
+  "pyxle/templates",
+  "pyxle_langkit/js"
 ]
 
 [tool.coverage.run]

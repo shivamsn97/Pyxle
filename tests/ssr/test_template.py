@@ -7,6 +7,7 @@ import pytest
 
 from pyxle.devserver.routes import PageRoute
 from pyxle.devserver.settings import DevServerSettings
+from pyxle.ssr.renderer import InlineStyleFragment
 from pyxle.ssr.template import render_document
 
 
@@ -80,6 +81,44 @@ def test_render_document_inlines_global_styles(page_route: PageRoute, tmp_path: 
     # Closing tags should be escaped to avoid terminating the style prematurely.
     assert "<\\/style>" in html
     assert html.index("data-pyxle-style") < html.index("data-pyxle-head-start")
+
+
+def test_render_document_includes_inline_styles(page_route: PageRoute, tmp_path: Path) -> None:
+    settings = DevServerSettings.from_project_root(tmp_path)
+
+    html = render_document(
+        settings=settings,
+        page=page_route,
+        body_html="<main></main>",
+        props={},
+        script_nonce="nonce",
+        head_elements=page_route.head_elements,
+        inline_styles=(
+            InlineStyleFragment(
+                identifier="style-inline",
+                contents=".hero { color: red; }\n</style>",
+                source="pages/components/hero.css",
+            ),
+            InlineStyleFragment(
+                identifier="style-inline",
+                contents=".ignored { color: blue; }",
+                source="pages/ignored.css",
+            ),
+            InlineStyleFragment(
+                identifier="style-secondary",
+                contents="",
+                source=None,
+            ),
+        ),
+    )
+
+    assert html.count('data-pyxle-inline-style="style-inline"') == 1
+    assert 'data-pyxle-inline-source="pages/components/hero.css"' in html
+    assert '.hero { color: red; }' in html
+    assert '<\\/style>' in html
+    assert 'data-pyxle-inline-style="style-secondary"' in html
+    assert 'data-pyxle-inline-source="pages/ignored.css"' not in html
+    assert html.index('data-pyxle-inline-style="style-inline"') < html.index('data-pyxle-head-start')
 
 
 def test_render_document_uses_dynamic_route_asset_path(tmp_path: Path) -> None:

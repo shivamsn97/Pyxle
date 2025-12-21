@@ -157,6 +157,36 @@ def test_project_watcher_watches_global_styles(tmp_path: Path) -> None:
     assert style_dir.resolve() in scheduled
 
 
+def test_project_watcher_watches_global_scripts(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "pages").mkdir(parents=True)
+    (root / "public").mkdir()
+    script_dir = root / "scripts"
+    script_dir.mkdir()
+    (script_dir / "analytics.js").write_text("console.log('analytics');\n", encoding="utf-8")
+
+    settings = DevServerSettings.from_project_root(
+        root,
+        global_scripts=("scripts/analytics.js",),
+    )
+
+    observer = DummyObserver()
+    logger, _ = make_logger()
+
+    watcher = ProjectWatcher(
+        settings,
+        logger=logger,
+        observer_factory=lambda: observer,
+        timer_factory=lambda delay, callback: ManualTimerHandle(callback),
+        build_function=lambda *_: BuildSummary(),
+    )
+
+    watcher.start()
+
+    scheduled = {Path(path).resolve() for _, path, _ in observer.scheduled}
+    assert script_dir.resolve() in scheduled
+
+
 def test_project_watcher_stop_without_start(project: DevServerSettings) -> None:
     logger, _ = make_logger()
 

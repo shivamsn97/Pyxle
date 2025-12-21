@@ -148,6 +148,7 @@ class ProjectWatcher:
         observer.schedule(self._handler, str(public_dir), recursive=True)
         pages_root = pages_dir.resolve()
         public_root = public_dir.resolve()
+        watched_extras: set[Path] = set()
         for directory in _global_stylesheet_directories(self._settings):
             try:
                 resolved = directory.resolve()
@@ -157,7 +158,23 @@ class ProjectWatcher:
                 continue
             if resolved == pages_root or resolved == public_root:
                 continue
+            if resolved in watched_extras:
+                continue
             observer.schedule(self._handler, str(resolved), recursive=True)
+            watched_extras.add(resolved)
+        for directory in _global_script_directories(self._settings):
+            try:
+                resolved = directory.resolve()
+            except OSError:
+                continue
+            if not resolved.exists():
+                continue
+            if resolved == pages_root or resolved == public_root:
+                continue
+            if resolved in watched_extras:
+                continue
+            observer.schedule(self._handler, str(resolved), recursive=True)
+            watched_extras.add(resolved)
         observer.start()
         self._observer = observer
 
@@ -236,6 +253,7 @@ class ProjectWatcher:
                 f"apis: {len(summary.copied_api_modules)}, "
                 f"client assets: {len(summary.copied_client_assets)}, "
                 f"global styles: {len(summary.synced_stylesheets)}, "
+                f"global scripts: {len(summary.synced_scripts)}, "
                 f"removed: {len(summary.removed)}"
             )
         else:
@@ -312,6 +330,18 @@ def _global_stylesheet_directories(settings: DevServerSettings) -> list[Path]:
     seen: set[Path] = set()
     for sheet in settings.global_stylesheets:
         parent = sheet.source_path.parent
+        if parent in seen:
+            continue
+        seen.add(parent)
+        directories.append(parent)
+    return directories
+
+
+def _global_script_directories(settings: DevServerSettings) -> list[Path]:
+    directories: list[Path] = []
+    seen: set[Path] = set()
+    for script in settings.global_scripts:
+        parent = script.source_path.parent
         if parent in seen:
             continue
         seen.add(parent)

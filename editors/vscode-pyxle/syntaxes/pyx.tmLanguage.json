@@ -1,0 +1,27 @@
+{
+  "scopeName": "source.pyxle",
+  "name": "Pyxle",
+  "patterns": [
+    { "include": "#python-block" },
+    { "include": "#jsx-block" },
+    { "include": "source.python" },
+    { "include": "source.js.jsx" }
+  ],
+  "repository": {
+    "python-block": {
+      "name": "meta.embedded.block.python.pyxle",
+      "begin": "^(?=\\s*(?:#\\s*---\\s*(?:python|server)|@server|async\\s+def|def\\s|class\\s|from\\s+(?!.*['\"`])|import\\s+(?!.*['\"`])|if\\s|for\\s|while\\s|with\\s|try\\b|except\\b|finally\\b|return\\b|raise\\b|pass\\b|HEAD\\s*=|#))",
+      "while": "^(?!\\s*(?:#\\s*---\\s*(?:javascript|client)|export\\b|const\\b|let\\b|var\\b|function\\b|async\\s+function\\b|type\\b|interface\\b|import\\s+.+['\"`]|<))",
+      "applyEndPatternLast": true,
+      "patterns": [{ "include": "source.python" }]
+    },
+    "jsx-block": {
+      "name": "meta.embedded.block.jsx.pyxle",
+      "begin": "^(?=\\s*(?:#\\s*---\\s*(?:javascript|client)|export\\b|const\\b|let\\b|var\\b|function\\b|async\\s+function\\b|type\\b|interface\\b|import\\s+.+['\"`]|<))",
+      "while": "^(?!\\s*(?:#\\s*---\\s*(?:python|server)|@server|async\\s+def|def\\s|class\\s|from\\s+(?!.*['\"`])|import\\s+(?!.*['\"`])|if\\s|for\\s|while\\s|with\\s|try\\b|except\\b|finally\\b|HEAD\\s*=|return\\b|raise\\b|pass\\b))",
+      "applyEndPatternLast": true,
+      "patterns": [{ "include": "source.js.jsx" }]
+    }
+  },
+  "uuid": "d7c197b4-0995-4e8d-b2a1-15439d82f30f"
+}

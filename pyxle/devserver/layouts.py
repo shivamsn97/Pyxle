@@ -107,14 +107,21 @@ def _write_composed_module(
     ]
 
     statements: List[str] = [
+        "function getModuleExport(module, exportName) {",
+        "  if (!module || typeof module !== 'object') {",
+        "    return undefined;",
+        "  }",
+        "  return module[exportName];",
+        "}",
         "const PageComponent = typeof PageModule?.default === 'function'",
         "  ? PageModule.default",
         "  : function PyxlePageFallback() {",
         "      return null;",
         "    };",
-        "const PAGE_STATIC_SLOTS = normalizeSlots(PageModule?.slots);",
-        "const PAGE_SLOT_FACTORY = typeof PageModule?.createSlots === 'function'",
-        "  ? PageModule.createSlots",
+        "const PAGE_STATIC_SLOTS = normalizeSlots(getModuleExport(PageModule, 'slots'));",
+        "const PAGE_SLOT_EXPORT = getModuleExport(PageModule, 'createSlots');",
+        "const PAGE_SLOT_FACTORY = typeof PAGE_SLOT_EXPORT === 'function'",
+        "  ? PAGE_SLOT_EXPORT",
         "  : null;",
         "function resolvePageSlots(props) {",
         "  if (PAGE_SLOT_FACTORY) {",
@@ -131,6 +138,8 @@ def _write_composed_module(
         static_slots_alias = f"WrapperStaticSlots{index}"
         slots_factory_alias = f"WrapperSlotsFactory{index}"
         resolver_name = f"resolveWrapperSlots{index}"
+        slots_value_alias = f"{module_alias}SlotsValue"
+        slots_factory_value_alias = f"{module_alias}SlotsFactoryValue"
 
         imports.append(f"import * as {module_alias} from '{_relative_import(output_path, wrapper.client_path)}';")
         statements.extend(
@@ -140,9 +149,11 @@ def _write_composed_module(
                 "  : function PyxleAnonymousLayout(props) {",
                 "      return React.createElement(React.Fragment, null, props?.children ?? null);",
                 "    };",
-                f"const {static_slots_alias} = normalizeSlots({module_alias}?.slots);",
-                f"const {slots_factory_alias} = typeof {module_alias}?.createSlots === 'function'",
-                f"  ? {module_alias}.createSlots",
+            f"const {slots_value_alias} = getModuleExport({module_alias}, 'slots');",
+            f"const {static_slots_alias} = normalizeSlots({slots_value_alias});",
+            f"const {slots_factory_value_alias} = getModuleExport({module_alias}, 'createSlots');",
+            f"const {slots_factory_alias} = typeof {slots_factory_value_alias} === 'function'",
+            f"  ? {slots_factory_value_alias}",
                 "  : null;",
                 f"function {resolver_name}(props) {{",
                 f"  if ({slots_factory_alias}) {{",

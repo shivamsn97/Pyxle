@@ -42,6 +42,7 @@ class PyxParseResult:
     jsx_code: str
     loader: LoaderDetails | None
     python_line_numbers: Sequence[int]
+    jsx_line_numbers: Sequence[int]
     head_elements: tuple[str, ...]
     head_is_dynamic: bool
 
@@ -62,6 +63,12 @@ class _SegmentNode:
 
 
 @dataclass(slots=True)
+class _StringTracker:
+    delimiter: str
+    triple: bool
+
+
+@dataclass(slots=True)
 class _DocumentNode:
     segments: list[_SegmentNode]
 
@@ -69,15 +76,24 @@ class _DocumentNode:
 class PyxParser:
     """Split a `.pyx` source file into Python and JSX sections."""
 
-    def parse(self, source_path: Path) -> PyxParseResult:
+    def parse(self, source_path: Path, *, tolerant: bool = False) -> PyxParseResult:
         text = source_path.read_text(encoding="utf-8")
         lines = self._normalize_newlines(text)
+        return self._parse_from_lines(lines, tolerant=tolerant)
 
+    def parse_text(self, text: str, *, tolerant: bool = False) -> PyxParseResult:
+        """Parse raw `.pyx` content without reading from disk."""
+
+        lines = self._normalize_newlines(text)
+        return self._parse_from_lines(lines, tolerant=tolerant)
+
+    def _parse_from_lines(self, lines: Sequence[str], *, tolerant: bool = False) -> PyxParseResult:
         document = self._build_document(lines)
 
         python_lines: list[str] = []
         python_line_numbers: list[int] = []
         jsx_lines: list[str] = []
+        jsx_line_numbers: list[int] = []
 
         for segment in document.segments:
             if segment.kind == "python":
@@ -87,10 +103,11 @@ class PyxParser:
             else:
                 for entry in segment.lines:
                     jsx_lines.append(entry.text)
+                    jsx_line_numbers.append(entry.number)
 
         python_code = self._join_lines(python_lines)
         jsx_code = self._join_lines(jsx_lines)
-        tree = self._parse_python_ast(python_code, python_line_numbers)
+        tree = self._parse_python_ast(python_code, python_line_numbers, tolerant=tolerant)
         loader = self._detect_loader(tree, python_line_numbers)
         head_elements, head_is_dynamic = self._collect_head_elements(
             tree,
@@ -102,6 +119,7 @@ class PyxParser:
             jsx_code=jsx_code,
             loader=loader,
             python_line_numbers=tuple(python_line_numbers),
+            jsx_line_numbers=tuple(jsx_line_numbers),
             head_elements=head_elements,
             head_is_dynamic=head_is_dynamic,
         )
@@ -211,6 +229,8 @@ class PyxParser:
         self,
         python_code: str,
         python_line_numbers: Sequence[int],
+        *,
+        tolerant: bool,
     ) -> ast.Module | None:
         if not python_code.strip():
             return None
@@ -218,6 +238,8 @@ class PyxParser:
         try:
             return ast.parse(python_code, mode="exec", type_comments=True)
         except SyntaxError as exc:  # pragma: no cover - defensive
+            if tolerant:
+                return None
             line = self._map_lineno(exc.lineno, python_line_numbers)
             raise CompilationError(exc.msg, line) from exc
 
@@ -228,6 +250,7 @@ class PyxParser:
         stripped: str,
         idx: int,
         expect_indent: bool,
+        allow_unexpected_indent: bool,
     ) -> bool:
         if not stripped:
             return expect_indent
@@ -235,7 +258,7 @@ class PyxParser:
         current = indent_stack[-1]
 
         if indent > current:
-            if not expect_indent:
+            if not (expect_indent or allow_unexpected_indent):
                 raise CompilationError("Unexpected indentation in Python block", idx)
             indent_stack.append(indent)
         else:
@@ -471,47 +494,125 @@ class PyxParser:
         index = min(lineno - 1, len(python_line_numbers) - 1)
         return python_line_numbers[index]
 
-    @staticmethod
-    def _update_triple_quote_state(
+    def _update_python_expression_state(
+        self,
         line: str,
-        current: str | None,
-    ) -> str | None:
-        """Track whether we are inside a multi-line triple-quoted string."""
-
-        i = 0
+        current_string: _StringTracker | None,
+        paren_depth: int,
+        bracket_depth: int,
+        brace_depth: int,
+    ) -> tuple[_StringTracker | None, int, int, int, bool]:
+        idx = 0
         length = len(line)
+        string_state = current_string
 
-        while i < length:
-            if current is not None:
-                if line.startswith(current, i):
-                    i += 3
-                    current = None
-                    continue
-                i += 1
+        while idx < length:
+            if string_state is not None:
+                idx, string_state = self._consume_python_string(line, idx, string_state)
                 continue
 
-            if line[i] == "#":
+            char = line[idx]
+
+            if char == "#":
                 break
 
-            if line.startswith('"""', i) or line.startswith("'''", i):
-                current = line[i : i + 3]
-                i += 3
-                continue
-
-            if line[i] in _STRING_PREFIX_CHARS:
-                start = i
-                while start < length and line[start] in _STRING_PREFIX_CHARS:
-                    start += 1
-                if start + 3 <= length and (
-                    line.startswith('"""', start) or line.startswith("'''", start)
-                ):
-                    current = line[start : start + 3]
-                    i = start + 3
+            if char in _STRING_PREFIX_CHARS:
+                prefixed = self._match_prefixed_string(line, idx)
+                if prefixed is not None:
+                    tracker, literal_index = prefixed
+                    if tracker.triple:
+                        string_state = tracker
+                        idx = literal_index
+                    else:
+                        idx, string_state = self._consume_python_string(line, literal_index, tracker)
                     continue
 
+            if char in ("'", '"'):
+                tracker = _StringTracker(delimiter=char, triple=False)
+                idx, string_state = self._consume_python_string(line, idx + 1, tracker)
+                continue
+
+            if char in "([{":
+                if char == "(":
+                    paren_depth += 1
+                elif char == "[":
+                    bracket_depth += 1
+                else:
+                    brace_depth += 1
+                idx += 1
+                continue
+
+            if char in ")]}":
+                if char == ")":
+                    paren_depth = max(0, paren_depth - 1)
+                elif char == "]":
+                    bracket_depth = max(0, bracket_depth - 1)
+                else:
+                    brace_depth = max(0, brace_depth - 1)
+                idx += 1
+                continue
+
+            idx += 1
+
+        stripped = line.rstrip()
+        line_continuation = (
+            string_state is None
+            and not (paren_depth or bracket_depth or brace_depth)
+            and bool(stripped)
+            and stripped.endswith("\\")
+        )
+
+        return string_state, paren_depth, bracket_depth, brace_depth, line_continuation
+
+    @staticmethod
+    def _match_prefixed_string(line: str, index: int) -> tuple[_StringTracker, int] | None:
+        idx = index
+        length = len(line)
+
+        while idx < length and line[idx] in _STRING_PREFIX_CHARS:
+            idx += 1
+
+        if idx >= length:
+            return None
+
+        if line.startswith('"""', idx) or line.startswith("'''", idx):
+            quote = line[idx : idx + 3]
+            return _StringTracker(delimiter=quote, triple=True), idx + 3
+
+        if line[idx] in ("'", '"'):
+            quote = line[idx]
+            return _StringTracker(delimiter=quote, triple=False), idx + 1
+
+        return None
+
+    @staticmethod
+    def _consume_python_string(
+        line: str,
+        index: int,
+        tracker: _StringTracker,
+    ) -> tuple[int, _StringTracker | None]:
+        i = index
+        length = len(line)
+        if tracker.triple:
+            closing = tracker.delimiter
+        else:
+            closing = tracker.delimiter
+
+        while i < length:
+            char = line[i]
+            if char == "\\":
+                i = min(i + 2, length)
+                continue
+            if tracker.triple:
+                if line.startswith(closing, i):
+                    return i + len(closing), None
+                i += 1
+                continue
+            if char == closing:
+                return i + 1, None
             i += 1
 
-        return current
+        return length, tracker
 
     @staticmethod
     def _has_server_decorator(decorators: Sequence[ast.expr]) -> bool:
@@ -536,7 +637,11 @@ class _PythonState:
     def reset_for_new_segment(self) -> None:
         self.indent_stack: list[int] = [0]
         self.expect_indent = False
-        self.string_delimiter: str | None = None
+        self.string_state: _StringTracker | None = None
+        self.paren_depth = 0
+        self.bracket_depth = 0
+        self.brace_depth = 0
+        self.line_continuation = False
 
     def advance(
         self,
@@ -552,16 +657,35 @@ class _PythonState:
             stripped,
             line_number,
             self.expect_indent,
+            bool(
+                self.line_continuation
+                or self.paren_depth
+                or self.bracket_depth
+                or self.brace_depth
+            ),
         )
-        self.string_delimiter = self._parser._update_triple_quote_state(
+        (
+            self.string_state,
+            self.paren_depth,
+            self.bracket_depth,
+            self.brace_depth,
+            self.line_continuation,
+        ) = self._parser._update_python_expression_state(
             line,
-            self.string_delimiter,
+            self.string_state,
+            self.paren_depth,
+            self.bracket_depth,
+            self.brace_depth,
         )
 
     def can_switch_segments(self, indent: int) -> bool:
-        if self.string_delimiter is not None:
+        if self.string_state is not None:
             return False
         if self.expect_indent:
+            return False
+        if self.line_continuation:
+            return False
+        if self.paren_depth or self.bracket_depth or self.brace_depth:
             return False
         if indent == 0:
             return True

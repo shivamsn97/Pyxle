@@ -175,15 +175,20 @@ def test_load_config_parses_styling_block(tmp_path: Path) -> None:
                 "globalStyles": [
                     "styles/global.css",
                     "styles/theme/dark.css",
-                ]
+                ],
+                "globalScripts": [
+                    "scripts/analytics.js",
+                ],
             }
         },
     )
 
     config = load_config(tmp_path)
     assert config.global_styles == ("styles/global.css", "styles/theme/dark.css")
+    assert config.global_scripts == ("scripts/analytics.js",)
     representation = config.to_dict()["styling"]
     assert representation["globalStyles"] == ["styles/global.css", "styles/theme/dark.css"]
+    assert representation["globalScripts"] == ["scripts/analytics.js"]
 
 
 def test_load_config_rejects_invalid_styling_block(tmp_path: Path) -> None:
@@ -198,6 +203,16 @@ def test_load_config_rejects_invalid_styling_block(tmp_path: Path) -> None:
         load_config(tmp_path)
 
     write_config(tmp_path, {"styling": {"globalStyles": [""]}})
+
+    with pytest.raises(ConfigError):
+        load_config(tmp_path)
+
+    write_config(tmp_path, {"styling": {"globalScripts": "not-a-list"}})
+
+    with pytest.raises(ConfigError):
+        load_config(tmp_path)
+
+    write_config(tmp_path, {"styling": {"globalScripts": [""]}})
 
     with pytest.raises(ConfigError):
         load_config(tmp_path)

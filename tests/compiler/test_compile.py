@@ -233,12 +233,12 @@ def test_compile_respects_server_import_alias(tmp_path: Path) -> None:
 
 
 def test_ensure_server_import_ignores_whitespace_only_source() -> None:
-    assert compiler_writers._ensure_server_import("   \n") == "   \n"
+    assert compiler_writers.ensure_server_import("   \n") == "   \n"
 
 
 def test_ensure_server_import_handles_parse_failure_with_leading_blanks() -> None:
     raw_source = "\n \n@@"
-    result = compiler_writers._ensure_server_import(raw_source)
+    result = compiler_writers.ensure_server_import(raw_source)
     lines = result.splitlines()
     assert lines[2] == "from pyxle.runtime import server"
 
@@ -252,7 +252,7 @@ def test_ensure_server_import_follows_future_imports() -> None:
         """
     ).lstrip("\n")
 
-    result = compiler_writers._ensure_server_import(source)
+    result = compiler_writers.ensure_server_import(source)
     lines = result.splitlines()
 
     assert lines[0] == "from __future__ import annotations"
@@ -272,7 +272,7 @@ def test_ensure_server_import_handles_docstring_and_future() -> None:
         '''
     ).lstrip("\n")
 
-    result = compiler_writers._ensure_server_import(source)
+    result = compiler_writers.ensure_server_import(source)
     lines = result.splitlines()
 
     assert lines[0] == '"""Example module."""'
@@ -281,6 +281,20 @@ def test_ensure_server_import_handles_docstring_and_future() -> None:
     assert lines[3] == "from pyxle.runtime import server"
     assert lines[4] == ""
     assert lines[5] == "answer = 42"
+
+
+def test_ensure_server_import_reports_insert_position() -> None:
+    source = dedent(
+        '''
+        """Example."""
+
+        value = 1
+        '''
+    ).lstrip("\n")
+
+    result, index = compiler_writers.ensure_server_import(source, return_insert_position=True)
+    assert "from pyxle.runtime import server" in result
+    assert index == 1
 
 
 def test_compile_persists_head_elements(tmp_path: Path) -> None:
@@ -372,6 +386,42 @@ def test_compile_static_page_uses_stub(tmp_path: Path) -> None:
 
     client_text = result.client_output.read_text(encoding="utf-8")
     assert "Landing" in client_text
+
+
+def test_compile_rewrites_pyx_imports_in_client_output(tmp_path: Path) -> None:
+    content = dedent(
+        """
+        import React from 'react';
+
+        import Layout from './layout.pyx';
+        import { Hero } from '../components/hero.pyx';
+        export { Footer } from '../components/footer.pyx';
+
+        const Lazy = React.lazy(() => import('../chunks/hero.pyx'));
+        const Skip = import(condition ? '../chunks/skip.pyx' : '../chunks/unused.pyx');
+
+        export default function Page() {
+            return (
+                <div>
+                    <Layout />
+                    <Hero />
+                </div>
+            );
+        }
+        """
+    )
+
+    source = write(tmp_path, "project/pages/index.pyx", content)
+    build_root = tmp_path / "project/.pyxle-build"
+
+    result = compile_file(source, build_root=build_root)
+
+    client_text = result.client_output.read_text(encoding="utf-8")
+    assert "./layout.jsx" in client_text
+    assert "../components/hero.jsx" in client_text
+    assert "../chunks/hero.jsx" in client_text
+    # Conditional dynamic import should not change because the specifier isn't a literal.
+    assert "../chunks/skip.pyx" in client_text
 
 
 def test_compile_rejects_non_pyx_files(tmp_path: Path) -> None:

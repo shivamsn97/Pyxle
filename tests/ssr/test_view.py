@@ -12,7 +12,7 @@ from starlette.requests import Request
 from pyxle.devserver.routes import PageRoute
 from pyxle.devserver.settings import DevServerSettings
 from pyxle.ssr import view as ssr_view
-from pyxle.ssr.renderer import ComponentRenderError
+from pyxle.ssr.renderer import ComponentRenderError, InlineStyleFragment, RenderResult
 from pyxle.ssr.view import (
     HeadEvaluationError,
     build_page_navigation_response,
@@ -28,11 +28,13 @@ def anyio_backend() -> str:  # pragma: no cover - fixture wiring
 class StubRenderer:
     def __init__(self) -> None:
         self.calls: list[tuple[Path, dict[str, object]]] = []
-        self.responses: list[str] = []
+        self.responses: list[RenderResult] = []
 
-    async def render(self, component_path: Path, props: dict[str, object]) -> str:
+    async def render(self, component_path: Path, props: dict[str, object]) -> RenderResult:
         self.calls.append((component_path, props))
-        return self.responses.pop(0) if self.responses else "<div></div>"
+        if self.responses:
+            return self.responses.pop(0)
+        return RenderResult(html="<div></div>")
 
 
 class StubOverlay:
@@ -102,7 +104,7 @@ async def test_build_page_response_without_loader(settings: DevServerSettings, t
     renderer = StubRenderer()
     overlay = StubOverlay()
     overlay = StubOverlay()
-    renderer.responses.append("<main>empty</main>")
+    renderer.responses.append(RenderResult(html="<main>empty</main>"))
 
     page = _page_route(tmp_path, loader_name=None)
 
@@ -143,7 +145,7 @@ async def test_build_page_navigation_response_returns_payload(
     tmp_path: Path,
 ) -> None:
     renderer = StubRenderer()
-    renderer.responses.append("<main>empty</main>")
+    renderer.responses.append(RenderResult(html="<main>empty</main>"))
     overlay = StubOverlay()
     page = _page_route(tmp_path, loader_name=None)
 
@@ -208,7 +210,7 @@ async def load_home(request):
     )
 
     renderer = StubRenderer()
-    renderer.responses.append("<p>SSR</p>")
+    renderer.responses.append(RenderResult(html="<p>SSR</p>"))
 
     scope = {
         "type": "http",
@@ -234,6 +236,40 @@ async def load_home(request):
     assert "<title>Home</title>" in body_text
     assert renderer.calls[-1][0] == page.client_module_path
     assert renderer.calls[-1][1]["data"]["value"] == "9"
+
+
+@pytest.mark.anyio
+async def test_build_page_response_inlines_renderer_styles(
+    settings: DevServerSettings,
+    tmp_path: Path,
+) -> None:
+    renderer = StubRenderer()
+    renderer.responses.append(
+        RenderResult(
+            html="<p>Styled</p>",
+            inline_styles=(
+                InlineStyleFragment(
+                    identifier="style-one",
+                    contents=".hero { color: red; }",
+                    source="pages/index.css",
+                ),
+            ),
+        )
+    )
+
+    page = _page_route(tmp_path, loader_name=None)
+    request = Request({"type": "http", "http_version": "1.1", "method": "GET", "path": "/", "root_path": "", "headers": []})
+
+    response = await build_page_response(
+        request=request,
+        settings=settings,
+        page=page,
+        renderer=renderer,
+    )
+
+    body_text = (await _read_response_body(response)).decode()
+    assert 'data-pyxle-inline-style="style-one"' in body_text
+    assert '.hero { color: red; }' in body_text
 
 
 @pytest.mark.anyio
@@ -507,7 +543,7 @@ async def test_build_page_response_uses_manifest_assets_in_production(
     tmp_path: Path,
 ) -> None:
     renderer = StubRenderer()
-    renderer.responses.append("<section>prod</section>")
+    renderer.responses.append(RenderResult(html="<section>prod</section>"))
 
     prod_settings = replace(
         settings,
@@ -545,7 +581,7 @@ async def test_build_page_response_handles_missing_manifest_entry(
     tmp_path: Path,
 ) -> None:
     renderer = StubRenderer()
-    renderer.responses.append("<section>prod</section>")
+    renderer.responses.append(RenderResult(html="<section>prod</section>"))
 
     prod_settings = replace(settings, debug=False, page_manifest={})
 
@@ -684,7 +720,12 @@ async def test_build_page_response_refreshes_shared_python_modules(settings: Dev
         )
 
         renderer = StubRenderer()
-        renderer.responses.extend(["<section>first</section>", "<section>second</section>"])
+        renderer.responses.extend(
+            [
+                RenderResult(html="<section>first</section>"),
+                RenderResult(html="<section>second</section>"),
+            ]
+        )
 
         request = Request({
             "type": "http",

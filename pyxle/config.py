@@ -30,6 +30,7 @@ class PyxleConfig:
     page_route_middleware: tuple[str, ...] = ()
     api_route_middleware: tuple[str, ...] = ()
     global_styles: tuple[str, ...] = ()
+    global_scripts: tuple[str, ...] = ()
 
     def to_devserver_kwargs(self) -> Dict[str, Any]:
         """Return keyword arguments for :class:`pyxle.devserver.DevServerSettings`."""
@@ -65,6 +66,7 @@ class PyxleConfig:
             },
             "styling": {
                 "globalStyles": list(self.global_styles),
+                "globalScripts": list(self.global_scripts),
             },
         }
 
@@ -172,7 +174,7 @@ def _parse_config_dict(data: Dict[str, Any], *, source: Path) -> PyxleConfig:
         data.get("routeMiddleware"),
         source=source,
     )
-    global_styles = _parse_styling_block(data.get("styling"), source=source)
+    global_styles, global_scripts = _parse_styling_block(data.get("styling"), source=source)
 
     return PyxleConfig(
         pages_dir=pages_dir,
@@ -187,30 +189,36 @@ def _parse_config_dict(data: Dict[str, Any], *, source: Path) -> PyxleConfig:
         page_route_middleware=page_route_specs,
         api_route_middleware=api_route_specs,
         global_styles=global_styles,
+        global_scripts=global_scripts,
     )
 
 
-def _parse_styling_block(value: Any, *, source: Path) -> tuple[str, ...]:
+def _parse_styling_block(value: Any, *, source: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     if value is None:
-        return ()
+        return ((), ())
     if not isinstance(value, Mapping):
         raise ConfigError(
-            f"Invalid value for 'styling' in '{source}': expected object with 'globalStyles' list."
+            f"Invalid value for 'styling' in '{source}': expected object with 'globalStyles'/'globalScripts' lists."
         )
 
-    global_styles = value.get("globalStyles")
-    if global_styles is None:
+    styles = _parse_path_list(value.get("globalStyles"), source=source, field_name="styling.globalStyles")
+    scripts = _parse_path_list(value.get("globalScripts"), source=source, field_name="styling.globalScripts")
+    return (styles, scripts)
+
+
+def _parse_path_list(value: Any, *, source: Path, field_name: str) -> tuple[str, ...]:
+    if value is None:
         return ()
-    if not isinstance(global_styles, list):
+    if not isinstance(value, list):
         raise ConfigError(
-            f"Invalid value for 'styling.globalStyles' in '{source}': expected list of file paths."
+            f"Invalid value for '{field_name}' in '{source}': expected list of file paths."
         )
 
     normalized: list[str] = []
-    for index, entry in enumerate(global_styles):
+    for index, entry in enumerate(value):
         if not isinstance(entry, str) or not entry.strip():
             raise ConfigError(
-                f"Invalid entry at index {index} in 'styling.globalStyles' within '{source}': expected non-empty string."
+                f"Invalid entry at index {index} in '{field_name}' within '{source}': expected non-empty string."
             )
         normalized.append(entry.strip())
 

@@ -20,6 +20,7 @@ from pyxle.compiler.exceptions import CompilationError
 from pyxle.config import ConfigError, PyxleConfig, load_config
 from pyxle.devserver.registry import build_metadata_registry
 from pyxle.devserver.routes import build_route_table
+from pyxle.devserver.scripts import GlobalScriptConfigError
 from pyxle.devserver.styles import GlobalStyleConfigError
 
 from .init import log_next_steps as _log_next_steps
@@ -286,7 +287,9 @@ def dev(
 
     global create_starlette_app
     if create_starlette_app is None:  # noqa: PLC0206 - module-level caching
-        from pyxle.devserver.starlette_app import create_starlette_app as _create_starlette_app
+        from pyxle.devserver.starlette_app import (
+            create_starlette_app as _create_starlette_app,
+        )
 
         create_starlette_app = _create_starlette_app
 
@@ -318,14 +321,16 @@ def dev(
         logger.info(f"Effective configuration:\n{pretty}")
 
     resolved_styles = _resolve_global_style_entries(project_root, effective_config)
+    resolved_scripts = _resolve_global_script_entries(project_root, effective_config)
 
     try:
         settings = DevServerSettings.from_project_root(  # type: ignore[union-attr]
             project_root,
             **effective_config.to_devserver_kwargs(),
             global_stylesheets=resolved_styles,
+            global_scripts=resolved_scripts,
         )
-    except GlobalStyleConfigError as exc:
+    except (GlobalStyleConfigError, GlobalScriptConfigError) as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1) from exc
 
@@ -396,14 +401,16 @@ def build(
 
     production_config = file_config.apply_overrides(debug=False)
     resolved_styles = _resolve_global_style_entries(project_root, production_config)
+    resolved_scripts = _resolve_global_script_entries(project_root, production_config)
 
     try:
         settings = DevServerSettings.from_project_root(  # type: ignore[union-attr]
             project_root,
             **production_config.to_devserver_kwargs(),
             global_stylesheets=resolved_styles,
+            global_scripts=resolved_scripts,
         )
-    except GlobalStyleConfigError as exc:
+    except (GlobalStyleConfigError, GlobalScriptConfigError) as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1) from exc
 
@@ -509,7 +516,9 @@ def serve(
 
     global create_starlette_app
     if create_starlette_app is None:  # noqa: PLC0206 - module-level caching
-        from pyxle.devserver.starlette_app import create_starlette_app as _create_starlette_app
+        from pyxle.devserver.starlette_app import (
+            create_starlette_app as _create_starlette_app,
+        )
 
         create_starlette_app = _create_starlette_app
 
@@ -525,14 +534,16 @@ def serve(
         starlette_port=port,
     )
     resolved_styles = _resolve_global_style_entries(project_root, production_config)
+    resolved_scripts = _resolve_global_script_entries(project_root, production_config)
 
     try:
         settings = DevServerSettings.from_project_root(  # type: ignore[union-attr]
             project_root,
             **production_config.to_devserver_kwargs(),
             global_stylesheets=resolved_styles,
+            global_scripts=resolved_scripts,
         )
-    except GlobalStyleConfigError as exc:
+    except (GlobalStyleConfigError, GlobalScriptConfigError) as exc:
         logger.error(str(exc))
         raise typer.Exit(code=1) from exc
 
@@ -717,6 +728,22 @@ def _resolve_global_style_entries(project_root: Path, config: PyxleConfig) -> tu
         seen.add(candidate)
         normalized.append(candidate)
 
+    return tuple(normalized)
+
+
+def _resolve_global_script_entries(project_root: Path, config: PyxleConfig) -> tuple[str, ...]:
+    """Return configured global scripts with duplicates removed."""
+
+    del project_root  # scripts currently require explicit configuration
+    entries = list(config.global_scripts)
+    seen: set[str] = set()
+    normalized: list[str] = []
+    for entry in entries:
+        candidate = (Path(entry.strip()).as_posix() if entry else "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
     return tuple(normalized)
 
 

@@ -109,6 +109,35 @@ def test_client_entry_includes_global_style_imports(tmp_path: Path) -> None:
     assert f"import '{import_statement}';" in client_entry
 
 
+def test_client_entry_includes_global_script_imports_before_styles(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    (root / "pages").mkdir(parents=True)
+    (root / "public").mkdir()
+    script_path = root / "scripts" / "analytics.js"
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+    script_path.write_text("console.log('analytics');\n", encoding="utf-8")
+    style_path = root / "styles" / "theme.css"
+    style_path.parent.mkdir(parents=True, exist_ok=True)
+    style_path.write_text("body { color: rebeccapurple; }\n", encoding="utf-8")
+
+    settings = DevServerSettings.from_project_root(
+        root,
+        global_scripts=("scripts/analytics.js",),
+        global_stylesheets=("styles/theme.css",),
+    )
+
+    write_client_bootstrap_files(settings)
+
+    client_entry = (settings.client_build_dir / CLIENT_ENTRY_FILENAME).read_text(encoding="utf-8")
+    script_import = f"import '{settings.global_scripts[0].import_specifier}';"
+    style_import = f"import '{settings.global_stylesheets[0].import_specifier}';"
+
+    assert script_import in client_entry
+    assert style_import in client_entry
+    assert client_entry.index(script_import) < client_entry.index("import React from 'react';")
+    assert client_entry.index(script_import) < client_entry.index(style_import)
+
+
 def test_client_entry_omits_overlay_in_production(tmp_path: Path) -> None:
     root = tmp_path / "project"
     (root / "pages").mkdir(parents=True)

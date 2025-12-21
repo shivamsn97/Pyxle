@@ -39,6 +39,28 @@ def test_parse_static_page(tmp_path: Path) -> None:
     assert result.head_elements == ()
 
 
+def test_parse_text_round_trip(tmp_path: Path) -> None:
+    source_text = dedent(
+        """
+        import React from 'react';
+
+        export default function About() {
+            return <div>About</div>;
+        }
+        """
+    ).strip("\n")
+
+    source_path = write(tmp_path, "pages/about.pyx", source_text)
+    parser = PyxParser()
+
+    from_disk = parser.parse(source_path)
+    in_memory = parser.parse_text(source_text)
+
+    assert in_memory.python_code == from_disk.python_code
+    assert in_memory.jsx_code == from_disk.jsx_code
+    assert in_memory.loader == from_disk.loader
+
+
 def test_parse_loader_detection(tmp_path: Path) -> None:
     content = "\n".join(
         [
@@ -263,6 +285,49 @@ def test_parse_allows_interleaved_python_and_js_sections(tmp_path: Path) -> None
     assert result.head_elements == ("<title>Mixed</title>",)
 
 
+def test_parse_python_multiline_string_with_js_content(tmp_path: Path) -> None:
+    content = dedent(
+        """
+        test = (" \\
+        import React, { useEffect, useState } from 'react'; \\
+        const VALUE = 1; \\
+        ")
+
+        export default function Demo() {
+            return <div />;
+        }
+        """
+    ).lstrip("\n")
+
+    source = write(tmp_path, "pages/stringy.pyx", content)
+    result = PyxParser().parse(source)
+
+    assert "import React, { useEffect, useState } from 'react';" in result.python_code
+    assert "const VALUE = 1;" in result.python_code
+    assert "import React, { useEffect, useState } from 'react';" not in result.jsx_code
+    assert "export default function Demo" in result.jsx_code
+
+
+def test_parse_python_line_continuation_not_treated_as_js(tmp_path: Path) -> None:
+    content = dedent(
+        """
+        value = 1 + \\
+            2
+
+        export default function Demo() {
+            return <div />;
+        }
+        """
+    ).lstrip("\n")
+
+    source = write(tmp_path, "pages/continuation.pyx", content)
+    result = PyxParser().parse(source)
+
+    assert "value = 1 +" in result.python_code
+    assert "2" in result.python_code
+    assert "export default function Demo" in result.jsx_code
+
+
 def test_parse_inconsistent_indentation_raises(tmp_path: Path) -> None:
     content = dedent(
         """
@@ -320,15 +385,18 @@ def test_parser_helper_methods_cover_branches() -> None:
 
     # Indentation tracking
     indent_stack = [0]
-    expect = parser._update_python_indentation(indent_stack, 0, "async def loader():", 1, False)
+    expect = parser._update_python_indentation(indent_stack, 0, "async def loader():", 1, False, False)
     assert expect is True
-    expect = parser._update_python_indentation(indent_stack, 4, "    return {}", 2, True)
+    expect = parser._update_python_indentation(indent_stack, 4, "    return {}", 2, True, False)
     assert expect is False
     # Blank line short-circuit
-    assert parser._update_python_indentation(indent_stack, 4, "", 3, False) is False
+    assert parser._update_python_indentation(indent_stack, 4, "", 3, False, False) is False
     # Dedent restoring stack with default zero
     temp_stack = [4]
-    expect = parser._update_python_indentation(temp_stack, 0, "return {}", 4, False)
+    expect = parser._update_python_indentation(temp_stack, 0, "return {}", 4, False, False)
+    assert expect is False
+    # Continuation indent allowance
+    expect = parser._update_python_indentation(indent_stack, 8, "        42", 5, False, True)
     assert expect is False
 
     # Python heuristics
@@ -363,6 +431,7 @@ def test_parser_helper_methods_cover_branches() -> None:
     assert parser._looks_like_js_import("import styles;") is True
     assert parser._looks_like_js_import("import {thing}") is True
     assert parser._looks_like_js_import("importmodule") is False
+    assert parser._looks_like_js_import("import type Foo") is True
 
     # Misc helpers
     assert parser._line_opens_block("for item in items:") is True
@@ -387,9 +456,52 @@ def test_parser_helper_methods_cover_branches() -> None:
     assert parser._has_server_decorator(decorators_call) is True
     assert parser._has_server_decorator([]) is False
 
-    # Triple quote state helper edge cases
-    assert parser._update_triple_quote_state("# nothing", None) is None
-    assert parser._update_triple_quote_state('r"""value"""', None) is None
+    # Expression state helper edge cases
+    triple_match = parser._match_prefixed_string("r'''value", 0)
+    assert triple_match is not None
+    tracker, literal_index = triple_match
+    assert tracker.triple is True
+    idx, string_state = parser._consume_python_string("value'''rest", literal_index, tracker)
+    assert idx == len("value'''")
+    assert string_state is None
+    string_state, paren_depth, _, _, line_cont = parser._update_python_expression_state(
+        "value = (",
+        None,
+        0,
+        0,
+        0,
+    )
+    assert string_state is None
+    assert paren_depth == 1
+    assert line_cont is False
+    string_state, _, _, _, line_cont = parser._update_python_expression_state(
+        "continued \\",
+        None,
+        0,
+        0,
+        0,
+    )
+    assert string_state is None
+    assert line_cont is True
+    # Comments short-circuit expression scanning
+    string_state, _, _, _, _ = parser._update_python_expression_state(
+        "# comment",
+        None,
+        0,
+        0,
+        0,
+    )
+    assert string_state is None
+    # Prefixed triple-quoted strings transition into tracked state
+    string_state, _, _, _, _ = parser._update_python_expression_state(
+        'r"""unterminated',
+        None,
+        0,
+        0,
+        0,
+    )
+    assert string_state is not None
+    assert string_state.triple is True
 
 
 def test_parse_server_decorator_on_class_raises(tmp_path: Path) -> None:

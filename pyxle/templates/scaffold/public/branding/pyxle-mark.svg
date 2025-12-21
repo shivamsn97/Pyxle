@@ -11,5 +11,4 @@
   </defs>
   <path d="M20 16h16l12 16 12-16h16l-22 32 22 32H60L48 64 36 80H20l22-32z" stroke="url(#pyxle-mark-a)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" />
   <circle cx="48" cy="48" r="6" fill="#fbbf24" />
-  <path d="M24 18a4 4 0 0 0-4 4v12a4 4 0 0 0 0 0c10.667 0 19.333 10.667 30 10.667S69.333 34 80 34a4 4 0 0 0 0 0V22a4 4 0 0 0-4-4" stroke="url(#pyxle-mark-b)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.45" />
 </svg>

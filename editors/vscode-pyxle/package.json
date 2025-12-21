@@ -1,0 +1,53 @@
+{
+  "name": "pyxle-language-tools",
+  "displayName": "Pyxle Language Tools",
+  "publisher": "pyxle",
+  "version": "0.0.1",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:pyxle"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "pyxle",
+        "aliases": ["Pyxle", "pyxle"],
+        "extensions": [".pyx"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pyxle",
+        "scopeName": "source.pyxle",
+        "path": "./syntaxes/pyx.tmLanguage.json"
+      }
+    ],
+    "configuration": [
+      {
+        "title": "Pyxle Language Server",
+        "properties": {
+          "pyxleLangserver.command": {
+            "type": "string",
+            "default": "pyxle-langserver",
+            "description": "Executable used to launch the Pyxle language server."
+          },
+          "pyxleLangserver.args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": ["--stdio"],
+            "description": "Arguments forwarded to the language server command."
+          }
+        }
+      }
+    ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

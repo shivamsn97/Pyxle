@@ -18,7 +18,7 @@ from pyxle.devserver.overlay import OverlayManager
 from pyxle.devserver.routes import PageRoute
 from pyxle.devserver.settings import DevServerSettings
 
-from .renderer import ComponentRenderer, ComponentRenderError
+from .renderer import ComponentRenderer, ComponentRenderError, InlineStyleFragment
 from .template import (
     ManifestLookupError,
     build_document_shell,
@@ -42,6 +42,7 @@ class PageArtifacts:
     body_html: str
     head_elements: tuple[str, ...]
     head_markup: str
+    inline_styles: tuple[InlineStyleFragment, ...]
     status_code: int
 
 
@@ -72,6 +73,7 @@ async def build_page_response(
                 props=artifacts.component_props,
                 script_nonce=script_nonce,
                 head_elements=artifacts.head_elements,
+                inline_styles=artifacts.inline_styles,
             )
         except ManifestLookupError:
             document = render_document(
@@ -81,6 +83,7 @@ async def build_page_response(
                 props=artifacts.component_props,
                 script_nonce=script_nonce,
                 head_elements=artifacts.head_elements,
+                inline_styles=artifacts.inline_styles,
             )
             if overlay is not None:
                 await overlay.notify_clear(route_path=page.path)
@@ -308,7 +311,9 @@ async def _create_page_artifacts(
 
     head_elements = _resolve_head_elements(page, module)
     component_props = _compose_component_props(loader_props)
-    body_html = await renderer.render(page.client_module_path, component_props)
+    render_result = await renderer.render(page.client_module_path, component_props)
+    body_html = render_result.html
+    inline_styles = render_result.inline_styles
     head_markup = render_head_markup(head_elements)
 
     return PageArtifacts(
@@ -316,6 +321,7 @@ async def _create_page_artifacts(
         body_html=body_html,
         head_elements=head_elements,
         head_markup=head_markup,
+        inline_styles=inline_styles,
         status_code=status_code,
     )
 
