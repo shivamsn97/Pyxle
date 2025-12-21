@@ -1,61 +1,47 @@
-# Testing Strategy
+# Testing Status & Verification Tips
 
-Pyxle projects are regular Python + React apps, so you can use your preferred testing stack. The Pyxle repo itself uses:
+Pyxle does not bundle an official or opinionated test runner yet. Until the framework ships first-class tooling, rely on the same verification steps you already trust in your projects and focus on smoke-testing the supported Pyxle commands.
 
-- `pytest --cov=pyxle --cov-report=term-missing`
-- `vitest --coverage`
+## Current recommendations
 
-## Recommended approach for apps
+- Exercise `pyxle dev` while editing to confirm loaders, routes, and the SPA router behave as expected.
+- Run `pyxle build` (optionally with `--incremental`) before you commit so compiler regressions surface early.
+- Launch `pyxle serve --skip-build` against the freshly built `dist/` directory and hit critical routes with `curl` or your browser to ensure hashed assets resolve correctly.
 
-### Python
+## Lightweight automation ideas
 
-- Test loaders, API routes, and middleware with `pytest` + `httpx.AsyncClient` or `starlette.testclient.TestClient`.
-- Because loaders receive the Starlette `Request`, you can construct fake requests via `Request(scope)` for unit tests or spin up an ASGI app for integration tests.
+### Loader/API smoke test
 
-### React/JS
+```python
+import asyncio
+from httpx import AsyncClient
+from pyxle.devserver.starlette_app import create_starlette_app
 
-- Use `vitest` + `@testing-library/react` to test compiled components (they are plain JSX modules).
-- If you prefer TypeScript, add a `tsconfig.json` and let Vite handle it; Pyxle does not limit file extensions in `pages/` (only `.pyx` is special).
+async def verify_api(settings):
+    app = create_starlette_app(settings)
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        response = await client.get("/api/pulse")
+        response.raise_for_status()
 
-### End-to-end
-
-- Any Playwright/Cypress-style tool works. Start `pyxle dev`, run the E2E suite against `http://127.0.0.1:8000`.
-
-## CI tips
-
-1. Install Python + Node deps (`pyxle install --python --node`).
-2. Run Tailwind build (`npm run build:css`).
-3. Execute tests.
-4. Run `pyxle build` and upload `dist/` artifacts.
-
-## Compare with Next.js
-
-Next.js leans on Jest/Playwright; Pyxle leaves the choice to you. The only Pyxle-specific addition is the `.pyx` compiler, which you can drive via `pyxle compile` inside tests if you need to assert on generated artifacts.
-
-### Example GitHub Actions matrix
-
-```yaml
-jobs:
-	test:
-		runs-on: ubuntu-latest
-		strategy:
-			matrix:
-				python: ['3.11']
-				node: ['20']
-		steps:
-			- uses: actions/checkout@v4
-			- uses: actions/setup-python@v5
-				with:
-					python-version: ${{ matrix.python }}
-			- uses: actions/setup-node@v4
-				with:
-					node-version: ${{ matrix.node }}
-			- run: pip install -r requirements.txt
-			- run: npm install
-			- run: npm run build:css
-			- run: pytest
-			- run: vitest run --coverage
+asyncio.run(verify_api(settings))
 ```
+
+Swap in whichever routes matter most to your app; this pattern ensures Starlette, middleware hooks, and loaders all execute without involving the dev server UI.
+
+### Client checks
+
+- Start `pyxle dev --host 0.0.0.0` and manually load pages on multiple devices/browsers.
+- Use your preferred browser automation stack (for example, the tools you already run against other projects) pointed at the dev server. Pyxle does not add new requirements beyond serving HTML on port `8000`.
+
+### CI outline
+
+1. `pyxle install --python --node`
+2. `npm run build:css`
+3. `pyxle build`
+4. Optional: `PYXLE_ENV=production pyxle serve --skip-build &` + health check `curl`
+5. Publish the `dist/` artifacts when the health check passes.
+
+Keep these steps in a shell script so you can reuse them locally and in CI without depending on a particular third-party test runner.
 
 ---
 **Navigation:** [← Previous](langkit.md) | [Next →](../reference/index.md)

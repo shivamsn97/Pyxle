@@ -41,21 +41,22 @@ Uncaught exceptions propagate to `pyxle/devserver/overlay.py`, which broadcasts 
 ### Testing loaders without the dev server
 
 ```python
-import pytest
+import asyncio
 from starlette.requests import Request
-from starlette.datastructures import URL
 
 from pages.index import load_home
 
-@pytest.mark.asyncio
-async def test_load_home_smoke():
+async def smoke_test():
     scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
     request = Request(scope, receive=lambda: None)
     data = await load_home(request)
-    assert "message" in data
+    if "message" not in data:
+        raise RuntimeError("Loader returned unexpected payload")
+
+asyncio.run(smoke_test())
 ```
 
-This keeps loaders honest without spinning up Vite. For integration tests, hit `pyxle dev` with `httpx.AsyncClient` or Playwright.
+This keeps loaders honest without spinning up Vite. For broader coverage, script `pyxle dev` and issue HTTP requests with `httpx.AsyncClient` or plain `curl`.
 
 ## Compare with Next.js
 

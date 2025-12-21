@@ -76,14 +76,12 @@ Checklist:
 ### Smoke-test builds in CI
 
 ```sh
-pytest --maxfail=1 --disable-warnings
-vitest run --run
 pyxle build
 PYXLE_ENV=production pyxle serve --skip-build --port 9000 &
 curl --retry 5 --retry-delay 2 http://127.0.0.1:9000/api/pulse
 ```
 
-Fail the pipeline if health checks return non-200 responses.
+Fail the pipeline if health checks return non-200 responses, then shut down the `pyxle serve` process before publishing artifacts.
 
 ---
 **Navigation:** [← Previous](index.md) | [Next →](../tooling/index.md)

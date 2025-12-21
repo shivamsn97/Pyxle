@@ -40,7 +40,7 @@ async def load_category(request: Request):
     return {"category": params["category"]}
 ```
 
-Pair this with Vitest/Playwright tests that hit `/shop/shirts` to keep regressions from sneaking in when renaming folders.
+Pair this with manual smoke checks (for example, `curl http://localhost:8000/shop/shirts`) or your existing browser automation scripts to keep regressions from sneaking in when renaming folders.
 
 ### Compare with Next.js
 

@@ -182,11 +182,12 @@ Need to extend the theme, add custom layers, or change the content globs? Follow
 
 ## Development
 
-Install the project with the optional development dependencies and run the tests:
+Install the project with the optional development dependencies, then exercise the supported CLI commands before contributing changes:
 
 ```bash
 pip install -e .[dev]
-pytest
+pyxle dev --help
+pyxle build --help
 ```
 
-The test suite enforces 95% coverage for the CLI package.
+Run `pyxle dev` or `pyxle build` locally to validate your changes; there is no officially supported automated test harness yet.

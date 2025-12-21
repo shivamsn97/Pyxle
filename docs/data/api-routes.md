@@ -39,19 +39,20 @@ Because API modules live in the same repo as loaders, you can import shared serv
 ### Testing APIs with httpx
 
 ```python
-import pytest
+import asyncio
 from httpx import AsyncClient
 from pyxle.devserver.starlette_app import create_starlette_app
 
-@pytest.mark.asyncio
-async def test_pulse():
+async def smoke_test(settings):
     app = create_starlette_app(settings)
     async with AsyncClient(app=app, base_url="http://test") as client:
         response = await client.get("/api/pulse")
-    assert response.status_code == 200
+        response.raise_for_status()
+
+asyncio.run(smoke_test(settings))
 ```
 
-Use the same middleware and hooks configured in `pyxle.config.json`; tests exercise the full stack.
+Use the same middleware and hooks configured in `pyxle.config.json`; this pattern exercises the full stack without relying on a specific unit-test framework.
 
 ## Compare with Next.js
 

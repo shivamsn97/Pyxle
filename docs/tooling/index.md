@@ -5,7 +5,7 @@ Keep your developer experience sharp with LangKit, the VS Code extension, and a 
 ## You will learn
 
 - How LangKit + the VS Code extension provide syntax highlighting, completions, and diagnostics for `.pyx` files.
-- Testing strategies for Python (pytest/httpx) and React (Vitest/Testing Library).
+- Current testing status plus practical manual verification tips for Pyxle apps.
 
 ## Pages in this section
 

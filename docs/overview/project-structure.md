@@ -38,14 +38,14 @@ my-app/
 
 ```sh
 # Fast feedback loop
-pyxle dev          # Starts Starlette + Vite with React Fast Refresh
-pytest -q          # Re-run loader/API unit tests
-vitest run         # Exercise shared frontend utilities
+pyxle dev                   # Starts Starlette + Vite with React Fast Refresh
+pyxle build --incremental   # Recompile only the files that changed
+pyxle serve --skip-build    # Preview the production bundle without Vite
 ```
 
 - Keep `.pyxle-build/` gitignored; delete it when switching branches to force a clean rebuild.
 - Edit `pyxle.config.json` to register custom middleware or change the default dev server ports without touching CLI flags.
-- Use standard React testing tools (Testing Library, Playwright) pointed at `npm run dev -- --host` if you need browser automation; the Starlette proxy mirrors responses exactly.
+- Use your preferred browser automation or manual cURL checks against `pyxle dev --host 0.0.0.0` to verify routes end-to-end; the Starlette proxy mirrors responses exactly.
 
 ## Compare with Next.js
 
