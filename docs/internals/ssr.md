@@ -32,3 +32,18 @@ Pyxle renders React components on the server by shelling out to Node, then strea
 Pyxle's SSR is closer to Next.js pages router (React DOM render-to-string) than to the app router (React Server Components). There is no Flight protocol; the entire result is HTML + JSON. Because the renderer is a subprocess, you can swap it for a custom implementation by passing a different factory to `ComponentRenderer` (useful for experimental renderers or pre-rendering workflows).
 
 See [Production build](../build/production-build.md) to understand how hashed assets are wired into the manifest consumed by the renderer.
+
+### Custom renderers
+
+You can inject your own renderer:
+
+```python
+from pyxle.ssr.renderer import ComponentRenderer
+
+renderer = ComponentRenderer(factory=my_factory)
+```
+
+Where `my_factory` returns callables that accept `(component_path, props)` and return `RenderResult`. This is handy for experimenting with streaming SSR or alternative runtimes.
+
+---
+**Navigation:** [← Previous](compiler.md) | [Next →](../README.md)

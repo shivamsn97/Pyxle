@@ -1,6 +1,6 @@
 # Project Structure
 
-Pyxle projects mirror the layout of the default scaffold produced by `pyxle init`. Every folder has a matching runtime component so you always know where behaviour is defined.
+Pyxle projects mirror the layout of the default scaffold produced by `pyxle init`. Every folder has a matching runtime component so you always know where app behaviour lives, and nothing is framework-only boilerplate.
 
 ```
 my-app/
@@ -34,6 +34,19 @@ my-app/
 - `metadata/pages/**/*.json` capture loader/head metadata for SSR.
 - `server/pages/**/*.py` wrap loader results so Starlette can stream HTML via `pyxle.ssr.build_page_response`.
 
+## Developer workflow tips
+
+```sh
+# Fast feedback loop
+pyxle dev          # Starts Starlette + Vite with React Fast Refresh
+pytest -q          # Re-run loader/API unit tests
+vitest run         # Exercise shared frontend utilities
+```
+
+- Keep `.pyxle-build/` gitignored; delete it when switching branches to force a clean rebuild.
+- Edit `pyxle.config.json` to register custom middleware or change the default dev server ports without touching CLI flags.
+- Use standard React testing tools (Testing Library, Playwright) pointed at `npm run dev -- --host` if you need browser automation; the Starlette proxy mirrors responses exactly.
+
 ## Compare with Next.js
 
 - `pages/` resembles the legacy Next.js `pages/` directory, but each file is dual (Python + JSX) instead of JavaScript-only.
@@ -41,3 +54,6 @@ my-app/
 - API routes live under `pages/api/` just like Next.js, but they are pure Starlette modules.
 
 Continue with [Authoring `.pyx` files](../fundamentals/pyx-files.md) for the file format or [File-based routing](../routing/file-based-routing.md) to see how filenames become routes.
+
+---
+**Navigation:** [← Previous](what-is-pyxle.md) | [Next →](../fundamentals/index.md)

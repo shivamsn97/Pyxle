@@ -31,3 +31,31 @@ Pyxle projects are regular Python + React apps, so you can use your preferred te
 ## Compare with Next.js
 
 Next.js leans on Jest/Playwright; Pyxle leaves the choice to you. The only Pyxle-specific addition is the `.pyx` compiler, which you can drive via `pyxle compile` inside tests if you need to assert on generated artifacts.
+
+### Example GitHub Actions matrix
+
+```yaml
+jobs:
+	test:
+		runs-on: ubuntu-latest
+		strategy:
+			matrix:
+				python: ['3.11']
+				node: ['20']
+		steps:
+			- uses: actions/checkout@v4
+			- uses: actions/setup-python@v5
+				with:
+					python-version: ${{ matrix.python }}
+			- uses: actions/setup-node@v4
+				with:
+					node-version: ${{ matrix.node }}
+			- run: pip install -r requirements.txt
+			- run: npm install
+			- run: npm run build:css
+			- run: pytest
+			- run: vitest run --coverage
+```
+
+---
+**Navigation:** [← Previous](langkit.md) | [Next →](../reference/index.md)

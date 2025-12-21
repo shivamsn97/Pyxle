@@ -53,3 +53,13 @@ Defined in `pyxle/config.py`:
 ## Compare with Next.js
 
 Equivalent to `next.config.js`, but kept in JSON so Python tooling can parse it without executing arbitrary code. Keep environment-specific tweaks outside the file (e.g., pass `--host 0.0.0.0` in staging) to avoid committing secrets.
+
+### Multiple config files
+
+- `pyxle dev --config pyxle.local.json`
+- `pyxle build --config pyxle.production.json`
+
+Store shared defaults in the base file and keep overrides minimal (ports, middleware, analytics flags, etc.).
+
+---
+**Navigation:** [← Previous](cli.md) | [Next →](../internals/index.md)

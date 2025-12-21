@@ -30,3 +30,12 @@ Install locally by running `npm install && npm run package` inside the extension
 Just like Next.js relies on TypeScript/ESLint integrations, Pyxle projects benefit from LangKit to catch loader mistakes (missing `@server`, wrong `request` parameter name, etc.) before the dev server runs.
 
 Roadmap items in `tasks/phase_*` describe upcoming tooling work—check them before hacking new features so documentation stays aligned.
+
+### Daily workflow
+
+- Add `"pyxle-langkit": "latest"` under `devDependencies` to keep CLI checks consistent in CI.
+- Use `pyxle-langkit lint pages/**/*.pyx` in pre-commit hooks to block malformed files.
+- Pair the VS Code extension with Python/TS formatters (Black, Prettier) for best results.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](testing.md)

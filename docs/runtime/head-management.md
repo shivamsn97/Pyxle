@@ -29,3 +29,26 @@ Because Pyxle renders HTML via `pyxle/ssr/template.DocumentTemplate`, everything
 This replaces `export const metadata = { ... }` or `<Head>` usage. The difference is that Pyxle does not diff head tags on the client; instead, it re-renders the full head during navigation using the metadata manifest. When you request navigation payloads (`x-pyxle-navigation: 1`), the response includes both HTML and head snippets so the client router can patch document metadata.
 
 Need to expose page-specific JSON-LD or Open Graph tags? Add them to `HEAD` or compute them inside the loader and string-format the result.
+
+### Dynamic head example
+
+```pyx
+from pyxle import server
+
+@server
+async def load_product(request):
+	product = await fetch_product(request.path_params["id"])
+	return {"product": product}
+
+def HEAD(data):
+	product = data["product"]
+	return f"""
+	<title>{product['name']} • Pyxle Shop</title>
+	<meta property="og:image" content="{product['image']}" />
+	"""
+```
+
+Returning a callable lets you reuse loader data instead of recomputing API calls.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](pyxle-client.md)

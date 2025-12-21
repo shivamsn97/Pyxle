@@ -1,6 +1,6 @@
 # Layouts and Slots
 
-Layouts work the same way as in Next.js: drop `pages/layout.pyx` (or nested `layout.pyx` files) and export a default component that renders `{ children }`. Pyxle also supports optional slots so pages can expose extra mount points.
+Layouts work the same way as in Next.js: drop `pages/layout.pyx` (or nested `layout.pyx` files) and export a default component that renders `{ children }`. Pyxle also supports optional slots so pages can expose extra mount points, perfect for toolbars or modal portals.
 
 ```pyx
 # pages/layout.pyx
@@ -38,7 +38,7 @@ pages/
     └── index.pyx
 ```
 
-The compiler records layout relationships in `.pyxle-build/metadata/pages/**/*.json` so both the SSR renderer and client runtime share the same tree.
+The compiler records layout relationships in `.pyxle-build/metadata/pages/**/*.json` so both the SSR renderer and client runtime share the same tree. You can unit-test layouts by importing the compiled `.jsx` output under `.pyxle-build/client/pages/...` when needed.
 
 ### Compare with Next.js
 
@@ -46,3 +46,6 @@ The compiler records layout relationships in `.pyxle-build/metadata/pages/**/*.j
 - Pyxle does not yet support `loading.js` or `error.js` equivalents; use Starlette middleware and the overlay for now.
 
 Next: [Client navigation](client-navigation.md) to see how the SPA router hops between layout-wrapped pages without full reloads.
+
+---
+**Navigation:** [← Previous](dynamic-segments.md) | [Next →](client-navigation.md)

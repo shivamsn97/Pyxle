@@ -27,8 +27,26 @@ async def load_post(request):
     return {"post": await get_post(post_id)}
 ```
 
+### Testing param plumbing
+
+```python
+from starlette.requests import Request
+
+@server
+async def load_category(request: Request):
+    params = request.path_params
+    if params.get("category") not in {"shirts", "shoes"}:
+        raise HTTPException(status_code=404)
+    return {"category": params["category"]}
+```
+
+Pair this with Vitest/Playwright tests that hit `/shop/shirts` to keep regressions from sneaking in when renaming folders.
+
 ### Compare with Next.js
 
 Identical to `app/blog/[slug]/page.tsx` or `app/docs/[...slug]/page.tsx`. Optional catch-alls behave like Next.js `[[...slug]]` when you need both `/docs` and `/docs/*` handled by the same file.
 
 See [Layouts & slots](layouts-and-slots.md) to understand how nested routes compose.
+
+---
+**Navigation:** [← Previous](file-based-routing.md) | [Next →](layouts-and-slots.md)

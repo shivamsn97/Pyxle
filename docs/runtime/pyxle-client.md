@@ -33,3 +33,12 @@ If a navigation request fails, the router surfaces the error via the overlay (de
 `pyxle/client` is closer to `next/navigation` + `next/link` from the app router, but implemented in a single entrypoint so it can run without Node features. Because Pyxle relies on Starlette for HTML + JSON responses, you get a streaming SSR path similar to Next.js `app` router without React Server Components.
 
 See [Client navigation](../routing/client-navigation.md) for end-to-end flow diagrams.
+
+### Practical extras
+
+- Call `prefetch('/path')` inside `useEffect` hooks to warm key dashboards.
+- Wrap imperative data refreshes around `navigate(window.location.pathname, { replace: true })` to simulate soft refreshes.
+- The router stores `window.__PYXLE_ROUTER__`; advanced integrations can subscribe to its internal events (see `pyxle/devserver/client_files.py`).
+
+---
+**Navigation:** [← Previous](head-management.md) | [Next →](../devserver/index.md)

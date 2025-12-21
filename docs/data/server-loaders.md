@@ -43,4 +43,26 @@ Because Pyxle loads your module directly, you can import anything, manage databa
 - Equivalent to `export async function GET()` or `generateMetadata`, except you stay in Python.
 - No separate `getServerSideProps` or `getStaticProps`; Pyxle currently renders everything dynamically.
 
+### Cache-friendly patterns
+
+```py
+from cachetools import TTLCache
+
+cache = TTLCache(maxsize=128, ttl=30)
+
+@server
+async def load_dashboard(request):
+  cached = cache.get("dashboard")
+  if cached:
+    return cached
+  data = await fetch_dashboard_stats()
+  cache["dashboard"] = data
+  return data
+```
+
+Use memoization or dependency injection to share expensive results between requests during development. Remember that `pyxle dev` hot-reloads modules, so caches reset after edits.
+
 Continue with [API routes](api-routes.md) to build REST endpoints alongside page loaders.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](api-routes.md)

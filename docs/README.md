@@ -1,46 +1,21 @@
 # Pyxle Documentation
 
-Pyxle embraces the "everything in one file" ergonomics of Next.js while keeping authoring purely in Python and React. This folder organizes the platform into small, focused guides so you can hop straight to the feature you care about without wading through a monolith. Each page mirrors an equivalent Next.js concept and links back to the source so you can verify behaviour against the implementation.
+Build full-stack web apps with Python loaders and React components—no framework archaeology required. This documentation is intentionally ordered so you can start with the basics, scaffold an app, wire routes/data, style it, and finally deploy to production. Every section has an `index.md` that orients you, and each page ends with Previous/Next links so you always know where to go next.
 
-## How to navigate
+## Suggested learning path
 
-- **Overview**
-  - [What is Pyxle?](overview/what-is-pyxle.md)
-  - [Project structure](overview/project-structure.md)
-- **Fundamentals**
-  - [Authoring `.pyx` files](fundamentals/pyx-files.md)
-  - [Loader ↔ component lifecycle](fundamentals/loader-lifecycle.md)
-- **Routing & navigation**
-  - [File-based routing](routing/file-based-routing.md)
-  - [Dynamic segments & catch-alls](routing/dynamic-segments.md)
-  - [Layouts and slots](routing/layouts-and-slots.md)
-  - [Client navigation + `<Link>`](routing/client-navigation.md)
-- **Data & middleware**
-  - [Server loaders](data/server-loaders.md)
-  - [API routes](data/api-routes.md)
-  - [Custom middleware & route hooks](data/middleware-hooks.md)
-- **Styling**
-  - [Tailwind workflow](styling/tailwind.md)
-  - [Global styles & scripts](styling/global-styles-and-scripts.md)
-- **Runtime behaviours**
-  - [Head management](runtime/head-management.md)
-  - [Pyxle client runtime](runtime/pyxle-client.md)
-- **Dev server**
-  - [How the dev server works](devserver/dev-server.md)
-  - [Overlay, watcher, and diagnostics](devserver/overlay-and-watchers.md)
-- **Build & deploy**
-  - [Production build pipeline](build/production-build.md)
-  - [`pyxle serve` and SSR runtime](build/serve-command.md)
-- **Reference**
-  - [CLI commands](reference/cli.md)
-  - [Configuration file](reference/config.md)
-- **Deployment**
-  - [Deploying Pyxle apps](deployment/deployment.md)
-- **Tooling**
-  - [LangKit, LSP, and editor support](tooling/langkit.md)
-  - [Testing strategy](tooling/testing.md)
-- **Internals**
-  - [Compiler architecture](internals/compiler.md)
-  - [SSR renderer](internals/ssr.md)
+1. **Overview** – Understand what Pyxle offers and how a project is laid out. Start at [Overview › index](overview/index.md).
+2. **Fundamentals** – Learn the `.pyx` file format and how loaders feed data into components. Begin with [Fundamentals › index](fundamentals/index.md).
+3. **Routing** – Map files to URLs, add layouts, and wire up client navigation. See [Routing › index](routing/index.md).
+4. **Data** – Write loaders, expose API routes, and attach middleware/policies. Head to [Data › index](data/index.md).
+5. **Styling** – Use Tailwind and global assets so every page looks right. Visit [Styling › index](styling/index.md).
+6. **Runtime** – Manage `<head>` tags and understand the Pyxle client runtime and hooks. Check [Runtime › index](runtime/index.md).
+7. **Dev Server** – Master `pyxle dev`, overlay diagnostics, and the watcher loop. Start with [Dev Server › index](devserver/index.md).
+8. **Build & Deploy** – Run production builds, serve assets, and ship to your platform. See [Build › index](build/index.md) followed by [Deployment › index](deployment/index.md).
+9. **Tooling & Reference** – Explore IDE helpers, testing approaches, CLI flags, and configuration via [Tooling › index](tooling/index.md) and [Reference › index](reference/index.md).
+10. **Internals (Optional)** – Curious about the compiler/SSR internals? Read [Internals › index](internals/index.md) last.
 
-Every page calls out the matching Next.js mental model under "Compare with Next.js" and links to implementation anchors so you can dive deeper when something looks off.
+Each guide includes runnable code snippets (Python + React) and references to the relevant source folders so you can adapt the patterns to your app.
+
+---
+**Navigation:** — | [Next → Overview › index](overview/index.md)

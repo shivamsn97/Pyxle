@@ -36,8 +36,28 @@ If neither is found, Pyxle raises `ApiRouteError` during import so you see the f
 
 Because API modules live in the same repo as loaders, you can import shared services, models, or configuration without dealing with HTTP serialization. Use them to expose diagnostics or webhooks while keeping your React pages purely presentational.
 
+### Testing APIs with httpx
+
+```python
+import pytest
+from httpx import AsyncClient
+from pyxle.devserver.starlette_app import create_starlette_app
+
+@pytest.mark.asyncio
+async def test_pulse():
+    app = create_starlette_app(settings)
+    async with AsyncClient(app=app, base_url="http://test") as client:
+        response = await client.get("/api/pulse")
+    assert response.status_code == 200
+```
+
+Use the same middleware and hooks configured in `pyxle.config.json`; tests exercise the full stack.
+
 ## Compare with Next.js
 
 These mirror Next.js `pages/api/*` routes, but they run on Starlette instead of Node. Use them when loader data is not enough (e.g., webhook receivers, long-poll endpoints, or `curl` diagnostics like the scaffolded `/api/pulse`).
 
 See [Custom middleware & route hooks](middleware-hooks.md) for attaching cross-cutting concerns.
+
+---
+**Navigation:** [← Previous](server-loaders.md) | [Next →](middleware-hooks.md)

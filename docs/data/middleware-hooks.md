@@ -51,3 +51,6 @@ This is similar to Next.js Middleware + Route Handlers, except you control plain
 Related docs:
 - [Configuration reference](../reference/config.md)
 - [Dev server internals](../devserver/dev-server.md)
+
+---
+**Navigation:** [← Previous](api-routes.md) | [Next →](../styling/index.md)

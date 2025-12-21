@@ -81,3 +81,21 @@ Think of `pyxle dev` as `next dev` split into Starlette (for Python loaders/APIs
 - Pyxle overlay for loader/API stack traces.
 
 Deep dive into [Overlay & watchers](overlay-and-watchers.md) for diagnostics.
+
+### Customising ports and hosts
+
+```json
+// pyxle.config.json
+{
+    "devServer": {
+        "host": "0.0.0.0",
+        "port": 4000,
+        "vitePort": 5199
+    }
+}
+```
+
+Restart `pyxle dev` after changing hosts/ports; Vite inherits the new settings automatically.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](overlay-and-watchers.md)

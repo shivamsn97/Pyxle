@@ -53,3 +53,20 @@ Use `--log-format json` to emit machine-readable logs (handy for CI). The defaul
 | Serve | `next start` | `pyxle serve` |
 
 Use [`pyxle.config.json`](config.md) to control defaults so you rarely need to pass CLI flags.
+
+### Automate via npm scripts
+
+```json
+{
+  "scripts": {
+    "dev": "pyxle dev",
+    "build": "pyxle build",
+    "serve": "pyxle serve --skip-build"
+  }
+}
+```
+
+This keeps cross-language projects on the same command surface as your frontend devs.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](config.md)

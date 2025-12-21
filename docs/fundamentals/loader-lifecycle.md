@@ -16,7 +16,13 @@ from pyxle.ssr import build_page_response
 
 async def endpoint(request):
     loader_result = await load_page(request)
-    return await build_page_response(request, settings, page=metadata, renderer=component_renderer)
+    return await build_page_response(
+        request,
+        settings,
+        page=metadata,
+        renderer=component_renderer,
+        loader_payload=loader_result,
+    )
 ```
 
 ### Status codes and redirects
@@ -32,9 +38,31 @@ Loaders receive `starlette.requests.Request`, so you can use `.query_params`, `.
 
 Uncaught exceptions propagate to `pyxle/devserver/overlay.py`, which broadcasts the stack trace to the browser overlay while Starlette still returns a styled error page. Fix the code and the watcher will rebuild plus dismiss the overlay.
 
+### Testing loaders without the dev server
+
+```python
+import pytest
+from starlette.requests import Request
+from starlette.datastructures import URL
+
+from pages.index import load_home
+
+@pytest.mark.asyncio
+async def test_load_home_smoke():
+    scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
+    request = Request(scope, receive=lambda: None)
+    data = await load_home(request)
+    assert "message" in data
+```
+
+This keeps loaders honest without spinning up Vite. For integration tests, hit `pyxle dev` with `httpx.AsyncClient` or Playwright.
+
 ## Compare with Next.js
 
 - Equivalent to `export async function GET()` + `export default function Page({ params, searchParams })`. Pyxle currently passes only `request`, so parse params from `request.path_params` or `request.query_params` (Starlette APIs).
 - There is no Suspense boundary between loader and component—fetch in Python, not in the component.
 
 Next: [File-based routing](../routing/file-based-routing.md) to see how loaders are wired to URLs.
+
+---
+**Navigation:** [← Previous](pyx-files.md) | [Next →](../routing/index.md)

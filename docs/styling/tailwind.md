@@ -36,3 +36,12 @@ Pyxle ships with Tailwind out of the box so you can style components immediately
 - Because loaders run on the server, you can read Tailwind tokens in Python if you expose them as JSON (custom workflow).
 
 See [Global styles & scripts](global-styles-and-scripts.md) for configuring additional CSS/JS files that should load on every page.
+
+### Tips for theme sharing
+
+- Store design tokens in `pages/styles/theme.css` or JSON files imported by both Python and React (e.g., `theme.json` read via `pathlib.Path`).
+- Tailwind plugins work as usual—enable `@tailwindcss/forms` inside `tailwind.config.cjs` and rerun the CLI.
+- For component libraries, create `pages/components/ui/` and import them from `.pyx` files; Vite handles the module graph.
+
+---
+**Navigation:** [← Previous](../styling/index.md) | [Next →](global-styles-and-scripts.md)

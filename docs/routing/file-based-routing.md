@@ -1,6 +1,6 @@
 # File-based Routing
 
-Pyxle inspects everything under `pages/` and turns filenames into Starlette routes using `pyxle/routing/paths.py`. The rules intentionally mirror Next.js:
+Pyxle inspects everything under `pages/` and turns filenames into Starlette routes using `pyxle/routing/paths.py`. The rules intentionally mirror Next.js so app developers can glance at the filesystem and understand the URL map:
 
 | File | Route |
 | --- | --- |
@@ -25,6 +25,13 @@ Folders wrapped in parentheses, e.g. `pages/(marketing)/cta.pyx`, are omitted fr
 
 If a folder contains `index.pyx`, the compiler collapses the `index` segment so `pages/blog/index.pyx` becomes `/blog` rather than `/blog/index`.
 
+### Developer checklist for new routes
+
+1. Create the file under `pages/` (or `pages/api/` for HTTP handlers).
+2. Export a loader + component; Pyxle handles the rest.
+3. Optionally add `HEAD` entries or layout files alongside your route.
+4. Run `pyxle dev`—the watcher updates Starlette + Vite without a restart.
+
 ### Custom middleware per route set
 
 Use `pyxle.config.json`:
@@ -46,3 +53,6 @@ Each dotted path should expose a callable returning `starlette.middleware.Middle
 - There is no `metadata/` or `head.tsx` file; use the [Head management](../runtime/head-management.md) guide instead.
 
 For dynamic segments and catch-alls, continue to [Dynamic segments](dynamic-segments.md).
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](dynamic-segments.md)

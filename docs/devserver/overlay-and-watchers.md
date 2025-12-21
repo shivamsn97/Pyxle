@@ -36,3 +36,12 @@ Troubleshooting tips:
 
 - If the overlay disconnects repeatedly, ensure nothing else is proxying the `/__pyxle__` routes.
 - For heavy file trees, increase the debounce interval via `ProjectWatcher(debounce_seconds=...)` (requires custom dev server entrypoint for now).
+
+### Advanced diagnostics
+
+- Hit `GET /__pyxle__/routes` (development only) to inspect the current route manifest.
+- Run `pyxle dev --verbose` to print every rebuild plan—helpful when diagnosing missing files.
+- Wrap your loaders in `try/except` and call `overlay.notify_error` manually if you need custom error frames.
+
+---
+**Navigation:** [← Previous](dev-server.md) | [Next →](../build/index.md)

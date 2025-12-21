@@ -31,3 +31,10 @@ Think of this as the `.next/server/app/...` output. Unlike Next.js, Pyxle compil
 Related docs:
 - [SSR renderer](ssr.md)
 - [Loader lifecycle](../fundamentals/loader-lifecycle.md)
+
+### Debugging compilation errors
+
+Run `pyxle compile pages/news/index.pyx --verbose` to inspect the generated artifacts without starting the dev server. The command prints the paths for server/client output so you can diff them in your editor.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](ssr.md)

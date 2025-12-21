@@ -23,6 +23,19 @@ import { Link } from 'pyxle/client';
 - Set `replace` to avoid pushing to history.
 - External URLs (`href` starting with `http`) fall back to normal anchors.
 
+### Imperative navigation
+
+```jsx
+import { navigate } from 'pyxle/client';
+
+async function handleDelete(projectId) {
+	await fetch(`/api/projects/${projectId}`, { method: 'DELETE' });
+	await navigate('/projects');
+}
+```
+
+`navigate()` resolves to `true` when the client router handled the transition and falls back to `window.location.assign` when running outside the browser (SSR) or if the router is offline.
+
 ## Navigation request trace
 
 ```
@@ -55,6 +68,15 @@ X-Pyxle-Navigation: 1
 - Similar to Next.js `next/link` + the app router's fetch cache. Pyxle does not have segments or partial renders yet, so each navigation fetches the full HTML/JSON payload for the destination page.
 - There is no React Server Component boundary; the navigation payload already contains fully rendered HTML plus the props for hydration.
 
+### Troubleshooting navigation failures
+
+- Check the dev server console: the proxy logs every `x-pyxle-navigation` request along with status codes.
+- Loader exceptions surface in the browser overlay; click the stack trace to jump back to your editor if you have editor integration configured.
+- Use your browser's Network tab and filter by `x-pyxle-navigation` to debug caching, headers, or middleware interactions.
+
 Related docs:
 - [Loader lifecycle](../fundamentals/loader-lifecycle.md)
 - [Overlay & watchers](../devserver/overlay-and-watchers.md) for how navigation failures surface during development.
+
+---
+**Navigation:** [← Previous](layouts-and-slots.md) | [Next →](../data/index.md)

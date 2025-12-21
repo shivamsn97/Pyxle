@@ -2,6 +2,8 @@
 
 Pyxle is a Python-first take on the Next.js mental model. Pages live in `pages/`, each `.pyx` file bundles its server loader and React component, and the dev server glues Starlette, Vite, and a Node-based SSR runtime into a single workflow. If you already know `app/` routes, file-based layouts, or data loaders from Next.js, Pyxle gives you the same ergonomics without leaving Python.
 
+Think about Pyxle as “Next.js for Python teams”: author everything in one file, fetch data with async Python, and ship React UI without writing a separate API layer.
+
 ## Guiding ideas
 
 1. **One file per feature** – Python loader + JSX live side-by-side so business logic stays near the UI.
@@ -52,6 +54,26 @@ pyxle dev
 
 Open `pages/index.pyx`, edit the loader or JSX, and the dev server will rebuild, invalidate import caches, and trigger the Vite overlay automatically.
 
+## Start building
+
+```py
+# pages/index.pyx (minimal example)
+from pyxle import server
+
+@server
+async def load_home(request):
+	return {"message": "Hello from Pyxle"}
+
+import React from 'react';
+
+export default function Home({ data }) {
+	return <h1>{data.message}</h1>;
+}
+```
+
+- Need to call another API? import `httpx.AsyncClient` inside the loader.
+- Want client-side interactivity? Use standard React hooks (`useState`, `useEffect`) inside the component—`pages/index.pyx` already runs through Vite + React Refresh.
+
 ## Where features live
 
 - CLI commands: `pyxle/cli/__init__.py`
@@ -82,3 +104,6 @@ Set-Cookie: pyxle-dev=1; SameSite=Lax
 ```
 
 This is the same flow `pyxle serve` uses in production—the only difference is that `pyxle dev` also keeps Vite and the overlay websocket alive for instant feedback.
+
+---
+**Navigation:** [← Previous](index.md) | [Next →](project-structure.md)
