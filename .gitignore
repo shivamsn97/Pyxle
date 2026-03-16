@@ -5,8 +5,14 @@ test-app/
 .pyxle-build
 tasks/
 .github/**/*instructions.md
+.github/copilot-instructions.md
 memory.md
 roadmap.md
+description.md
+PHASE_*.md
+ANALYSIS_FRAMEWORK_PRIMITIVES.md
+HEAD_MERGER_FIX.md
+docs-old/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
