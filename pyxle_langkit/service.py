@@ -74,8 +74,12 @@ class PyxLanguageService:
                 symbols.extend(self._python_symbols(tree, document))
 
         if document.has_jsx:
-            analysis = self._react_analyzer.analyze(document.jsx_code)
-            symbols.extend(self._react_symbols(analysis.symbols))
+            try:
+                analysis = self._react_analyzer.analyze(document.jsx_code)
+            except RuntimeError:
+                analysis = None
+            if analysis is not None:
+                symbols.extend(self._react_symbols(analysis.symbols, document))
 
         return symbols
 
@@ -114,12 +118,12 @@ class PyxLanguageService:
         return entries
 
     @staticmethod
-    def _react_symbols(symbols: Sequence[ReactSymbol]) -> Sequence[DocumentSymbol]:
+    def _react_symbols(symbols: Sequence[ReactSymbol], document: PyxDocument) -> Sequence[DocumentSymbol]:
         return [
             DocumentSymbol(
                 name=symbol.name,
                 kind=symbol.kind,
-                line=symbol.line,
+                line=document.map_jsx_line(symbol.line),
                 detail="React export",
             )
             for symbol in symbols

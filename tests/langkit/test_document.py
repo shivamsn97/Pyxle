@@ -36,6 +36,8 @@ def test_editor_python_segments_injects_runtime_import() -> None:
 
     assert code.splitlines()[0] == "from pyxle.runtime import server"
     assert len(mapping) == len(code.splitlines())
+    assert mapping[0] == 0  # synthetic helper import has no source line
+    assert mapping[1] == 1
 
 
 def test_editor_jsx_segments_rewrite_pyx_imports() -> None:

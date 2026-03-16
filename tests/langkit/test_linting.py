@@ -17,6 +17,11 @@ class FakeReactAnalyzer:
         return ReactAnalysis(symbols=(), error=error)
 
 
+class BrokenReactAnalyzer:
+    def analyze(self, source: str) -> ReactAnalysis:  # pragma: no cover - simple fake
+        raise RuntimeError("Node.js is required to analyze JSX.")
+
+
 def test_react_syntax_error_maps_back_to_original_line() -> None:
     text = dedent(
         """
@@ -44,6 +49,7 @@ def test_react_syntax_error_maps_back_to_original_line() -> None:
     react_issue = next((issue for issue in issues if issue.source == "react"), None)
     assert react_issue is not None
     assert react_issue.line == 9  # fifth JSX line maps back to original document line
+    assert react_issue.column == 12  # Babel columns are zero-based; lint issues are one-based
 
 
 def test_pyflakes_reports_undefined_name_and_unused_import() -> None:
@@ -62,6 +68,8 @@ def test_pyflakes_reports_undefined_name_and_unused_import() -> None:
     rules = {issue.rule for issue in issues}
     assert "pyflakes/UndefinedName" in rules
     assert "pyflakes/UnusedImport" not in rules  # math is used via math.pi
+    undefined = next(issue for issue in issues if issue.rule == "pyflakes/UndefinedName")
+    assert undefined.column == 12
 
 
 def test_pyflakes_detects_unused_import() -> None:
@@ -114,3 +122,51 @@ def test_unreachable_code_is_reported() -> None:
     issues = linter.lint_text(text, path="pages/index.pyx")
 
     assert any(issue.rule == "pyxle/unreachable-code" for issue in issues)
+
+
+def test_react_analyzer_failures_become_lint_warnings() -> None:
+    text = dedent(
+        """
+        export default function Page() {
+            return <div />;
+        }
+        """
+    ).strip("\n")
+
+    linter = PyxLinter(
+        parser=PyxLanguageParser(),
+        react_analyzer=BrokenReactAnalyzer(),
+    )
+    issues = linter.lint_text(text, path="pages/index.pyx")
+
+    assert len(issues) == 1
+    assert issues[0].rule == "react/analyzer-unavailable"
+    assert issues[0].severity == "warning"
+
+
+def test_script_and_image_semantic_checks() -> None:
+    text = dedent(
+        """
+        import { Script, Image } from 'pyxle/client';
+
+        export default function Page() {
+            return (
+                <>
+                    <Script strategy="never" module noModule />
+                    <Image src="/hero.png" width="0" />
+                </>
+            );
+        }
+        """
+    ).strip("\n")
+
+    linter = PyxLinter(parser=PyxLanguageParser())
+    issues = linter.lint_text(text, path="pages/index.pyx")
+    rules = {issue.rule for issue in issues}
+
+    assert "pyxle/script-src-required" in rules
+    assert "pyxle/script-strategy-invalid" in rules
+    assert "pyxle/script-module-conflict" in rules
+    assert "pyxle/image-alt-required" in rules
+    assert "pyxle/image-height-required" in rules
+    assert "pyxle/image-width-invalid" in rules

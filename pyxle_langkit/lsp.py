@@ -81,7 +81,12 @@ _server = PyxleLanguageServer()
 @_server.feature(_INITIALIZE)
 def initialize(server: PyxleLanguageServer, params: InitializeParams) -> InitializeResult:  # pragma: no cover - exercised via editors
     capabilities = ServerCapabilities(
-        text_document_sync=TextDocumentSyncOptions(change=TextDocumentSyncKind.Full)
+        text_document_sync=TextDocumentSyncOptions(
+            open_close=True,
+            change=TextDocumentSyncKind.Full,
+            save=True,
+        ),
+        document_symbol_provider=True,
     )
     return InitializeResult(capabilities=capabilities)
 

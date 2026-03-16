@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from pyxle.compiler.exceptions import CompilationError
+from pyxle_langkit.lint import LintIssue
 from pyxle_langkit import lsp
 
 
@@ -50,3 +51,30 @@ def test_publish_diagnostics_surfaces_compilation_errors(monkeypatch):
     assert diagnostics[0].message == "Unexpected indentation in Python block"
     assert diagnostics[0].source == "pyxle-compiler"
     assert server._document_cache == {}
+
+
+def test_issue_to_diagnostic_normalizes_line_and_column() -> None:
+    diagnostic = lsp._issue_to_diagnostic(
+        LintIssue(
+            source="python",
+            rule="pyflakes/UndefinedName",
+            severity="error",
+            message="undefined name 'missing'",
+            line=4,
+            column=12,
+        )
+    )
+
+    assert diagnostic.range.start.line == 3
+    assert diagnostic.range.start.character == 11
+    assert diagnostic.range.end.character == 12
+
+
+def test_initialize_declares_document_symbol_and_sync_capabilities() -> None:
+    result = lsp.initialize(lsp._server, None)  # params are currently unused
+
+    sync = result.capabilities.text_document_sync
+    assert sync is not None
+    assert sync.open_close is True
+    assert sync.save is True
+    assert result.capabilities.document_symbol_provider is True

@@ -66,17 +66,18 @@ function registerCompletionProvider(context, manager) {
                 await manager.ensureVirtualFile(document.uri); // guarantees latest snapshots
                 const context = requestContext
                     ? {
-                          triggerKind: requestContext.triggerKind,
                           triggerCharacter: requestContext.triggerCharacter,
                       }
                     : undefined;
-                const result = await vscode.commands.executeCommand(
+                const args = [
                     'vscode.executeCompletionItemProvider',
                     mapping.uri,
                     mapping.position,
-                    requestContext?.triggerCharacter,
-                    context
-                );
+                ];
+                if (context?.triggerCharacter) {
+                    args.push(context.triggerCharacter);
+                }
+                const result = await vscode.commands.executeCommand(...args);
                 return translateCompletionResult(manager, mapping.uri, result);
             }
         },
@@ -364,19 +365,24 @@ class SegmentManager {
     }
 
     async _refresh(document) {
+        const key = document.uri.toString();
         try {
             const response = await this.client.sendRequest(SEGMENTS_REQUEST, { uri: document.uri.toString() });
             if (!response) {
+                this.cache.delete(key);
+                this._removeVirtualPaths(key);
                 return;
             }
             const workspaceFolder = vscode.workspace.getWorkspaceFolder(document.uri);
             if (!workspaceFolder) {
+                this.cache.delete(key);
+                this._removeVirtualPaths(key);
                 return;
             }
             const virtualRoot = path.join(workspaceFolder.uri.fsPath, '.pyxle', '.lang-virtual');
             await this._writeVirtualFile(virtualRoot, workspaceFolder.uri.fsPath, document.uri, 'python', response.python?.code || '');
             await this._writeVirtualFile(virtualRoot, workspaceFolder.uri.fsPath, document.uri, 'jsx', response.jsx?.code || '');
-            this.cache.set(document.uri.toString(), {
+            this.cache.set(key, {
                 python: {
                     lineNumbers: response.python?.lineNumbers || [],
                 },
@@ -443,7 +449,16 @@ class SegmentManager {
         if (!info || !Array.isArray(info.lineNumbers)) {
             return -1;
         }
-        return info.lineNumbers.indexOf(sourceLine);
+        for (let idx = 0; idx < info.lineNumbers.length; idx += 1) {
+            const mapped = info.lineNumbers[idx];
+            if (typeof mapped !== 'number' || mapped < 1) {
+                continue;
+            }
+            if (mapped === sourceLine) {
+                return idx;
+            }
+        }
+        return -1;
     }
 
     _getVirtualUri(originalUri, kind) {
@@ -539,7 +554,7 @@ class SegmentManager {
             return null;
         }
         const originalLine = info.lineNumbers[position.line];
-        if (typeof originalLine !== 'number') {
+        if (typeof originalLine !== 'number' || originalLine < 1) {
             return null;
         }
         return new vscode.Position(Math.max(0, originalLine - 1), position.character);

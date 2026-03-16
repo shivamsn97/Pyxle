@@ -3,9 +3,7 @@
   "name": "Pyxle",
   "patterns": [
     { "include": "#python-block" },
-    { "include": "#jsx-block" },
-    { "include": "source.python" },
-    { "include": "source.js.jsx" }
+    { "include": "#jsx-block" }
   ],
   "repository": {
     "python-block": {

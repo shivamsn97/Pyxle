@@ -59,8 +59,8 @@ class PyxDocument:
         if self.loader and code.strip():
             code, insert_at = ensure_server_import(code, return_insert_position=True)
             if insert_at is not None:
-                anchor = self._line_anchor_for_insertion(line_numbers, insert_at)
-                line_numbers.insert(insert_at, anchor)
+                # Synthetic runtime-import lines do not map to user-authored source lines.
+                line_numbers.insert(insert_at, 0)
 
         return code, tuple(line_numbers)
 
@@ -69,17 +69,3 @@ class PyxDocument:
 
         rewritten, _ = rewrite_pyx_import_specifiers(self.jsx_code)
         return rewritten, tuple(self.jsx_line_numbers)
-
-    def _line_anchor_for_insertion(self, mapping: list[int], insert_at: int) -> int:
-        if not mapping:
-            if self.loader and self.loader.line_number:
-                return self.loader.line_number
-            return 1
-
-        if insert_at <= 0:
-            return mapping[0]
-
-        if insert_at - 1 < len(mapping):
-            return mapping[insert_at - 1]
-
-        return mapping[-1]

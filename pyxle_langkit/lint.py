@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
+from pyxle.compiler.jsx_parser import JSXComponent, parse_jsx_components
+
 try:  # pragma: no cover - optional dependency
     from pyflakes.checker import Checker as _PyflakesChecker
 except Exception:  # pragma: no cover - tooling-only optional import
@@ -29,6 +31,7 @@ _PYFLAKES_SEVERITY: dict[str, Severity] = {
 }
 
 _PYXLE_ALLOWED_GLOBALS = {"server"}
+_ALLOWED_SCRIPT_STRATEGIES = {"beforeInteractive", "afterInteractive", "lazyOnload"}
 
 from .document import PyxDocument
 from .parser import PyxLanguageParser
@@ -130,7 +133,7 @@ class PyxLinter:
                         severity="warning",
                         message="@server loader never returns a value; hydration will receive `None`.",
                         line=document.map_python_line(loader_node.lineno),
-                        column=loader_node.col_offset,
+                        column=self._to_one_based_column(loader_node.col_offset),
                     )
                 )
 
@@ -153,7 +156,7 @@ class PyxLinter:
                 continue
             severity = _PYFLAKES_SEVERITY.get(cls_name, "warning")
             line = document.map_python_line(getattr(message, "lineno", None))
-            column = getattr(message, "col", None)
+            column = self._to_one_based_column(getattr(message, "col", None))
             issues.append(
                 LintIssue(
                     source="python",
@@ -186,8 +189,21 @@ class PyxLinter:
         if not document.has_jsx:
             return []
 
-        analysis = self._react_analyzer.analyze(document.jsx_code)
         issues: list[LintIssue] = []
+        try:
+            analysis = self._react_analyzer.analyze(document.jsx_code)
+        except RuntimeError as exc:
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="react/analyzer-unavailable",
+                    severity="warning",
+                    message=str(exc),
+                    line=self._first_jsx_line(document),
+                    column=None,
+                )
+            )
+            return issues
 
         if analysis.error:
             mapped_line = document.map_jsx_line(analysis.error.line)
@@ -198,7 +214,7 @@ class PyxLinter:
                     severity="error",
                     message=analysis.error.message,
                     line=mapped_line,
-                    column=analysis.error.column,
+                    column=self._to_one_based_column(analysis.error.column),
                 )
             )
             return issues
@@ -211,10 +227,30 @@ class PyxLinter:
                     rule="react/default-export",
                     severity="warning",
                     message="Pages should export a default component for SSR + hydration.",
-                    line=None,
+                    line=self._first_jsx_line(document),
                     column=None,
                 )
             )
+
+        component_result = parse_jsx_components(
+            document.jsx_code,
+            target_components={"Script", "Image"},
+        )
+        if component_result.error:
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="react/component-analysis",
+                    severity="info",
+                    message=component_result.error,
+                    line=self._first_jsx_line(document),
+                    column=None,
+                )
+            )
+            return issues
+
+        for component in component_result.components:
+            issues.extend(self._lint_jsx_component(component, document))
 
         return issues
 
@@ -224,6 +260,225 @@ class PyxLinter:
             if isinstance(child, ast.Return):
                 return True
         return False
+
+    @staticmethod
+    def _to_one_based_column(column: int | None) -> int | None:
+        if column is None:
+            return None
+        return max(1, column + 1)
+
+    @staticmethod
+    def _first_jsx_line(document: PyxDocument) -> int | None:
+        if not document.jsx_line_numbers:
+            return None
+        return document.jsx_line_numbers[0]
+
+    def _lint_jsx_component(self, component: JSXComponent, document: PyxDocument) -> Iterable[LintIssue]:
+        if component.name == "Script":
+            return self._lint_script_component(component, document)
+        if component.name == "Image":
+            return self._lint_image_component(component, document)
+        return []
+
+    def _lint_script_component(self, component: JSXComponent, document: PyxDocument) -> Iterable[LintIssue]:
+        issues: list[LintIssue] = []
+        line = document.map_jsx_line(component.line)
+        column = self._to_one_based_column(component.column)
+        props = component.props
+
+        src = props.get("src")
+        if not isinstance(src, str) or not src.strip():
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="pyxle/script-src-required",
+                    severity="error",
+                    message="<Script /> requires a non-empty `src` prop.",
+                    line=line,
+                    column=column,
+                )
+            )
+
+        strategy = props.get("strategy", "afterInteractive")
+        if isinstance(strategy, str):
+            if not self._is_dynamic_expression(strategy) and strategy not in _ALLOWED_SCRIPT_STRATEGIES:
+                issues.append(
+                    LintIssue(
+                        source="react",
+                        rule="pyxle/script-strategy-invalid",
+                        severity="error",
+                        message=(
+                            "<Script /> strategy must be one of "
+                            "`beforeInteractive`, `afterInteractive`, or `lazyOnload`."
+                        ),
+                        line=line,
+                        column=column,
+                    )
+                )
+        elif strategy is not None:
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="pyxle/script-strategy-invalid",
+                    severity="error",
+                    message="<Script /> strategy must be a string literal.",
+                    line=line,
+                    column=column,
+                )
+            )
+
+        module_value = self._as_bool_literal(props.get("module"))
+        no_module_value = self._as_bool_literal(props.get("noModule"))
+        if module_value is True and no_module_value is True:
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="pyxle/script-module-conflict",
+                    severity="warning",
+                    message="<Script /> cannot set both `module` and `noModule` to true.",
+                    line=line,
+                    column=column,
+                )
+            )
+        return issues
+
+    def _lint_image_component(self, component: JSXComponent, document: PyxDocument) -> Iterable[LintIssue]:
+        issues: list[LintIssue] = []
+        line = document.map_jsx_line(component.line)
+        column = self._to_one_based_column(component.column)
+        props = component.props
+
+        src = props.get("src")
+        if not isinstance(src, str) or not src.strip():
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="pyxle/image-src-required",
+                    severity="error",
+                    message="<Image /> requires a non-empty `src` prop.",
+                    line=line,
+                    column=column,
+                )
+            )
+
+        alt = props.get("alt")
+        if not isinstance(alt, str) or not alt.strip():
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="pyxle/image-alt-required",
+                    severity="warning",
+                    message="<Image /> should include a meaningful non-empty `alt` prop.",
+                    line=line,
+                    column=column,
+                )
+            )
+
+        issues.extend(
+            self._lint_required_dimension(
+                props=props,
+                key="width",
+                line=line,
+                column=column,
+            )
+        )
+        issues.extend(
+            self._lint_required_dimension(
+                props=props,
+                key="height",
+                line=line,
+                column=column,
+            )
+        )
+
+        priority = self._as_bool_literal(props.get("priority"))
+        lazy = self._as_bool_literal(props.get("lazy"))
+        if priority is True and props.get("lazy") is not None and lazy is True:
+            issues.append(
+                LintIssue(
+                    source="react",
+                    rule="pyxle/image-priority-lazy-conflict",
+                    severity="warning",
+                    message="<Image /> with `priority` should not also set `lazy={true}`.",
+                    line=line,
+                    column=column,
+                )
+            )
+
+        return issues
+
+    def _lint_required_dimension(
+        self,
+        *,
+        props: dict[str, object],
+        key: str,
+        line: int | None,
+        column: int | None,
+    ) -> Iterable[LintIssue]:
+        if key not in props:
+            return [
+                LintIssue(
+                    source="react",
+                    rule=f"pyxle/image-{key}-required",
+                    severity="error",
+                    message=f"<Image /> requires a `{key}` prop.",
+                    line=line,
+                    column=column,
+                )
+            ]
+
+        value = props.get(key)
+        if self._is_dynamic_expression(value):
+            return []
+        numeric = self._as_positive_number(value)
+        if numeric is not None:
+            return []
+        return [
+            LintIssue(
+                source="react",
+                rule=f"pyxle/image-{key}-invalid",
+                severity="error",
+                message=f"<Image /> `{key}` must be a positive numeric literal.",
+                line=line,
+                column=column,
+            )
+        ]
+
+    @staticmethod
+    def _is_dynamic_expression(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        stripped = value.strip()
+        return stripped.startswith("{") and stripped.endswith("}")
+
+    @staticmethod
+    def _as_positive_number(value: object) -> float | None:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            return float(value) if value > 0 else None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            try:
+                parsed = float(stripped)
+            except ValueError:
+                return None
+            return parsed if parsed > 0 else None
+        return None
+
+    @staticmethod
+    def _as_bool_literal(value: object) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered == "true":
+                return True
+            if lowered == "false":
+                return False
+        return None
 
 
 class _UnreachableAnalyzer:
@@ -273,7 +528,7 @@ class _UnreachableAnalyzer:
 
     def _record_unreachable(self, statement: ast.stmt) -> None:
         line = self.document.map_python_line(getattr(statement, "lineno", None))
-        column = getattr(statement, "col_offset", None)
+        column = PyxLinter._to_one_based_column(getattr(statement, "col_offset", None))
         self.issues.append(
             LintIssue(
                 source="python",
