@@ -1,5 +1,11 @@
 # Pyxle
 
+> **⚠ Early Development — Not Production Ready**
+>
+> Pyxle is under active development and the API is subject to breaking changes at any time. Core features are still being built out, test coverage is incomplete in places, and there is no stable release yet. Use it to experiment, provide feedback, or contribute — but do not rely on it for production workloads.
+>
+> If you run into a bug or have a suggestion, please [open an issue](https://github.com/shivamsn97/pyxle/issues).
+
 Pyxle is a Python-first full-stack framework that pairs a Typer-powered CLI with Starlette, Vite, and React to deliver a Next.js-style developer experience. The MVP currently focuses on the project scaffolding workflow.
 
 ## Project Links
