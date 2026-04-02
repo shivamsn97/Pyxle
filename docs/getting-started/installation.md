@@ -18,10 +18,10 @@ npm --version      # 9 or later
 
 ## Install Pyxle
 
-Pyxle is not yet published on PyPI. Install directly from GitHub:
+Install Pyxle from PyPI:
 
 ```bash
-pip install git+https://github.com/shivamsn97/pyxle.git
+pip install pyxle-framework
 ```
 
 This installs the `pyxle` CLI and the framework runtime. Confirm it works:
@@ -36,7 +36,7 @@ pyxle --version
 python -m venv venv
 source venv/bin/activate   # macOS / Linux
 # venv\Scripts\activate    # Windows
-pip install git+https://github.com/shivamsn97/pyxle.git
+pip install pyxle-framework
 ```
 
 ## What gets installed

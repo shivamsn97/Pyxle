@@ -130,7 +130,7 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir git+https://github.com/shivamsn97/pyxle.git
+RUN pip install --no-cache-dir pyxle-framework
 
 # Install Node dependencies
 COPY package.json package-lock.json* ./

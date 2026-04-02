@@ -64,4 +64,5 @@ For framework contributors and power users.
 
 - GitHub: [github.com/shivamsn97/pyxle](https://github.com/shivamsn97/pyxle)
 - Issues: [github.com/shivamsn97/pyxle/issues](https://github.com/shivamsn97/pyxle/issues)
-- Install: `pip install git+https://github.com/shivamsn97/pyxle.git`
+- Install: `pip install pyxle-framework`
+- PyPI: [pypi.org/project/pyxle-framework](https://pypi.org/project/pyxle-framework/)
