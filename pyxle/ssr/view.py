@@ -620,6 +620,9 @@ def _evaluate_head_callable(
         ) from exc
 
     if inspect.isawaitable(value):
+        # Close the coroutine to prevent "was never awaited" warnings.
+        if hasattr(value, "close"):
+            value.close()
         raise HeadEvaluationError(
             f"Callable HEAD for {page.path} must return synchronously",
         )

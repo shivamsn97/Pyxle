@@ -141,19 +141,42 @@ class StaticAssetsMiddleware:
         prefix: str = "",
     ) -> bool:
         selected_scope = scope
+        original_path = scope.get("path", "")
         if prefix:
-            path = scope.get("path", "")
-            if not path.startswith(prefix):
+            if not original_path.startswith(prefix):
                 return False
-            stripped = path[len(prefix) :] or "/"
+            stripped = original_path[len(prefix) :] or "/"
             candidate = dict(scope)
             candidate["path"] = stripped
             raw_path = scope.get("raw_path")
             if isinstance(raw_path, (bytes, bytearray)):
                 candidate["raw_path"] = stripped.encode("utf-8")
             selected_scope = candidate
+
+        # Determine cache header based on path pattern.
+        # Vite hashed assets (e.g. /client/dist/assets/index-a1b2c3d4.js)
+        # are immutable and can be cached forever.
+        is_hashed_asset = (
+            prefix == "/client"
+            and "/dist/assets/" in original_path
+        )
+
+        async def _send_with_cache_headers(message):
+            if message.get("type") == "http.response.start":
+                headers = list(message.get("headers", []))
+                if is_hashed_asset:
+                    headers.append(
+                        (b"cache-control", b"public, max-age=31536000, immutable")
+                    )
+                else:
+                    headers.append(
+                        (b"cache-control", b"public, max-age=3600")
+                    )
+                message = {**message, "headers": headers}
+            await send(message)
+
         try:
-            await static_app(selected_scope, receive, send)
+            await static_app(selected_scope, receive, _send_with_cache_headers)
             return True
         except HTTPException as exc:
             if exc.status_code == 404:
@@ -319,58 +342,109 @@ def build_action_router(routes: Iterable[ActionRoute]) -> Router:
     Each action is registered as ``POST /api/__actions/<page_path>/<action_name>``.
     The handler imports the page server module, locates the action function by name,
     validates the ``__pyxle_action__`` tag, and dispatches the request to it.
+
+    For pages with catch-all or dynamic route parameters, a single catch-all
+    action route (``is_catchall=True``) is also registered.  It captures the
+    trailing path segments and extracts the action name from the last one,
+    allowing the client to resolve actions regardless of the active sub-path.
     """
 
     router = Router()
 
     for route in routes:
-        handler = _make_action_handler(route)
+        if route.is_catchall:
+            handler = _make_catchall_action_handler(route)
+        else:
+            handler = _make_action_handler(route)
         router.add_route(route.path, handler, methods=["POST"])
 
     return router
 
 
+async def _dispatch_action(
+    request: Request,
+    module_key: str,
+    server_module_path: Path,
+    action_name: str,
+) -> JSONResponse:
+    """Shared dispatch logic for both specific and catch-all action handlers."""
+    from pyxle.runtime import ActionError
+
+    try:
+        module = _import_module(module_key, server_module_path)
+    except ApiRouteError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    action_fn = getattr(module, action_name, None)
+    if action_fn is None:
+        return JSONResponse(
+            {"ok": False, "error": f"Action '{action_name}' not found"},
+            status_code=404,
+        )
+
+    if not getattr(action_fn, "__pyxle_action__", False):
+        return JSONResponse(
+            {"ok": False, "error": f"'{action_name}' is not a @action function"},
+            status_code=400,
+        )
+
+    try:
+        result = await action_fn(request)
+    except ActionError as exc:
+        payload: dict[str, object] = {"ok": False, "error": exc.message}
+        if exc.data:
+            payload["data"] = exc.data
+        return JSONResponse(payload, status_code=exc.status_code)
+    except Exception as exc:  # pragma: no cover - surfaced to client as 500
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+
+    if not isinstance(result, dict):
+        return JSONResponse(
+            {"ok": False, "error": "Action must return a JSON-serializable dict"},
+            status_code=500,
+        )
+
+    return JSONResponse({"ok": True, **result})
+
+
 def _make_action_handler(route: ActionRoute):
     async def handler(request: Request):
-        from pyxle.runtime import ActionError
+        return await _dispatch_action(
+            request, route.module_key, route.server_module_path, route.action_name,
+        )
 
-        try:
-            module = _import_module(route.module_key, route.server_module_path)
-        except ApiRouteError as exc:
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+    handler.__name__ = f"action_{route.module_key.replace('.', '_')}_{route.action_name}"
+    return handler
 
-        action_fn = getattr(module, route.action_name, None)
-        if action_fn is None:
+
+def _make_catchall_action_handler(route: ActionRoute):
+    """Create a handler that extracts the action name from a catch-all path.
+
+    The client constructs action URLs using ``window.location.pathname``.
+    For catch-all pages (e.g. ``/docs/{slug:path}``), the browser path
+    includes dynamic segments (e.g. ``/docs/getting-started/installation``),
+    producing an action URL like
+    ``/api/__actions/docs/getting-started/installation/search_docs``.
+
+    This handler captures the trailing path via ``{_pyxle_action_path:path}``
+    and treats the last segment as the action name.
+    """
+
+    async def handler(request: Request):
+        action_path = request.path_params.get("_pyxle_action_path", "")
+        action_name = action_path.rsplit("/", 1)[-1] if action_path else ""
+
+        if not action_name:
             return JSONResponse(
-                {"ok": False, "error": f"Action '{route.action_name}' not found"},
-                status_code=404,
-            )
-
-        if not getattr(action_fn, "__pyxle_action__", False):
-            return JSONResponse(
-                {"ok": False, "error": f"'{route.action_name}' is not a @action function"},
+                {"ok": False, "error": "Action name missing from request path"},
                 status_code=400,
             )
 
-        try:
-            result = await action_fn(request)
-        except ActionError as exc:
-            payload: dict[str, object] = {"ok": False, "error": exc.message}
-            if exc.data:
-                payload["data"] = exc.data
-            return JSONResponse(payload, status_code=exc.status_code)
-        except Exception as exc:  # pragma: no cover - surfaced to client as 500
-            return JSONResponse({"ok": False, "error": str(exc)}, status_code=500)
+        return await _dispatch_action(
+            request, route.module_key, route.server_module_path, action_name,
+        )
 
-        if not isinstance(result, dict):
-            return JSONResponse(
-                {"ok": False, "error": "Action must return a JSON-serializable dict"},
-                status_code=500,
-            )
-
-        return JSONResponse({"ok": True, **result})
-
-    handler.__name__ = f"action_{route.module_key.replace('.', '_')}_{route.action_name}"
+    handler.__name__ = f"action_{route.module_key.replace('.', '_')}_catchall"
     return handler
 
 
@@ -451,16 +525,66 @@ def create_starlette_app(
 
     # --- CORS middleware ---
     cors_middleware: Middleware | None = None
+
+    _ALL_INTERFACES = ("0.0.0.0", "::", "")
+    _LOOPBACK_HOSTS = (*_ALL_INTERFACES, "127.0.0.1", "localhost")
+
+    def _vite_dev_cors_kwargs(host: str, port: int) -> dict:
+        """Return ``CORSMiddleware`` origin kwargs for the Vite dev server.
+
+        Browsers treat ``localhost`` and ``127.0.0.1`` as distinct origins,
+        so both are listed when the server is on a loopback address.  When
+        bound to all interfaces (``0.0.0.0`` / ``::``), any hostname on the
+        Vite port is allowed via a regex so that LAN access (e.g. from a
+        phone) works too.
+        """
+        import re  # noqa: PLC0415
+
+        if host in _ALL_INTERFACES:
+            return {
+                "allow_origins": [f"http://localhost:{port}", f"http://127.0.0.1:{port}"],
+                "allow_origin_regex": re.compile(rf"^https?://[^:/]+:{port}$").pattern,
+            }
+        if host in _LOOPBACK_HOSTS:
+            return {"allow_origins": [f"http://localhost:{port}", f"http://127.0.0.1:{port}"]}
+        return {"allow_origins": [f"http://{host}:{port}"]}
+
     if settings.cors is not None and getattr(settings.cors, "enabled", False):
         from starlette.middleware.cors import CORSMiddleware
 
+        origins = list(settings.cors.origins)
+        cors_extra: dict = {}
+        # In debug mode, ensure the Vite dev server origin is always allowed
+        # so that HMR and asset requests from the Vite port succeed.
+        if settings.debug:
+            vite_kwargs = _vite_dev_cors_kwargs(settings.vite_host, settings.vite_port)
+            for vite_origin in vite_kwargs.get("allow_origins", []):
+                if vite_origin not in origins:
+                    origins.append(vite_origin)
+            if "allow_origin_regex" in vite_kwargs:
+                cors_extra["allow_origin_regex"] = vite_kwargs["allow_origin_regex"]
+
         cors_middleware = Middleware(
             CORSMiddleware,
-            allow_origins=list(settings.cors.origins),
+            allow_origins=origins,
             allow_methods=list(settings.cors.methods),
             allow_headers=list(settings.cors.headers),
             allow_credentials=settings.cors.credentials,
             max_age=settings.cors.max_age,
+            **cors_extra,
+        )
+    elif settings.debug:
+        # No user-configured CORS, but in dev mode we still need to allow
+        # cross-origin requests from the Vite dev server (different port).
+        from starlette.middleware.cors import CORSMiddleware
+
+        cors_middleware = Middleware(
+            CORSMiddleware,
+            **_vite_dev_cors_kwargs(settings.vite_host, settings.vite_port),
+            allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            allow_credentials=True,
+            max_age=600,
         )
 
     # --- CSRF middleware ---
@@ -508,6 +632,13 @@ def create_starlette_app(
         )
 
     middleware_stack: list[Middleware] = []
+
+    # GZip compression in production mode (reduces bandwidth ~60-70%).
+    if not settings.debug:
+        from starlette.middleware.gzip import GZipMiddleware  # noqa: PLC0415
+
+        middleware_stack.append(Middleware(GZipMiddleware, minimum_size=500))
+
     if cors_middleware is not None:
         middleware_stack.append(cors_middleware)
     if csrf_middleware is not None:

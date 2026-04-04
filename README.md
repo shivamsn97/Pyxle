@@ -86,7 +86,7 @@ Python 3.10+ and Node.js 18+.
 ## Contributing
 
 ```bash
-git clone https://github.com/shivamsn97/pyxle.git
+git clone https://github.com/pyxle-framework/pyxle.git
 cd pyxle
 pip install -e ".[dev]"
 pytest
@@ -96,4 +96,4 @@ pytest
 
 - [pyxle.dev](https://pyxle.dev)
 - [PyPI](https://pypi.org/project/pyxle-framework/)
-- [Issues](https://github.com/shivamsn97/pyxle/issues)
+- [Issues](https://github.com/pyxle-framework/pyxle/issues)

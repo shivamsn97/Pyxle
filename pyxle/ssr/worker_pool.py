@@ -63,23 +63,32 @@ class _WorkerState:
         return await future
 
     async def read_loop(self) -> None:
-        """Background task: relay stdout lines to waiting futures."""
+        """Background task: relay stdout lines to waiting futures.
+
+        Uses raw ``read()`` with manual newline splitting instead of
+        ``readline()`` so that responses of any size can be received.
+        ``readline()`` is capped by the stream's *limit* parameter
+        (default 64 KB) and deadlocks when a single NDJSON line is larger
+        than the limit because the write side blocks on the full pipe
+        buffer while the read side waits for a newline it cannot reach.
+        """
         assert self.process.stdout is not None
+        _READ_CHUNK = 256 * 1024  # 256 KB per read()
+        buf = b""
         try:
             while True:
-                line = await self.process.stdout.readline()
-                if not line:
+                chunk = await self.process.stdout.read(_READ_CHUNK)
+                if not chunk:
+                    # EOF — process closed stdout.  Flush remaining buffer.
+                    if buf.strip():
+                        self._dispatch_line(buf)
                     break
-                try:
-                    data: dict[str, Any] = json.loads(line.decode())
-                except json.JSONDecodeError:
-                    logger.debug("SSR worker sent non-JSON line: %r", line[:120])
-                    continue
-                request_id = data.get("id")
-                if request_id and request_id in self.pending:
-                    future = self.pending.pop(request_id)
-                    if not future.done():
-                        future.set_result(data)
+                buf += chunk
+                # Split completed lines (delimited by \n).
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if line:
+                        self._dispatch_line(line)
         except Exception as exc:
             logger.debug("SSR worker read loop terminated: %s", exc)
         finally:
@@ -89,6 +98,19 @@ class _WorkerState:
                 if not future.done():
                     future.set_exception(exc)
             self.pending.clear()
+
+    def _dispatch_line(self, line: bytes) -> None:
+        """Parse one NDJSON line and resolve the matching pending future."""
+        try:
+            data: dict[str, Any] = json.loads(line)
+        except json.JSONDecodeError:
+            logger.debug("SSR worker sent non-JSON line: %r", line[:120])
+            return
+        request_id = data.get("id")
+        if request_id and request_id in self.pending:
+            future = self.pending.pop(request_id)
+            if not future.done():
+                future.set_result(data)
 
     async def stop(self) -> None:
         """Send EOF to stdin and wait for the process to exit."""
@@ -226,6 +248,32 @@ class SsrWorkerPool:
             raise
 
         return result
+
+    async def invalidate(
+        self,
+        component_path: Path | None = None,
+    ) -> None:
+        """Broadcast a cache-invalidation message to all alive workers.
+
+        If *component_path* is given, only that component's cached bundle is
+        evicted.  Otherwise every cached bundle is cleared.
+        """
+        if not self._started:
+            return
+
+        payload_base: dict[str, Any] = {"type": "invalidate"}
+        if component_path is not None:
+            payload_base["componentPath"] = str(component_path.resolve())
+
+        for worker in self._workers:
+            if not worker.alive:
+                continue
+            request_id = str(uuid.uuid4())
+            payload = {"id": request_id, **payload_base}
+            try:
+                await worker.send(payload)
+            except WorkerPoolError:
+                pass  # worker is dying; skip gracefully
 
     def _pick_worker(self) -> _WorkerState | None:
         alive = [w for w in self._workers if w.alive]

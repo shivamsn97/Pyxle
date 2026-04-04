@@ -33,6 +33,28 @@ for (const method of ['log', 'info', 'warn', 'error', 'debug', 'dir', 'trace']) 
 // Cache heavy modules per project root so they are loaded once, not per request.
 const _moduleCache = new Map();
 
+// Cache compiled component bundles so esbuild is only called once per component.
+// Key: resolved componentPath, Value: { moduleExports, styleDescriptors }
+const _bundleCache = new Map();
+
+// Stable temp directory per worker (created once, cleaned on exit).
+let _stableTempDir = null;
+
+function getStableTempDir(projectRoot) {
+  if (_stableTempDir) return _stableTempDir;
+  const baseDir = path.join(projectRoot, '.pyxle-build', '.ssr-tmp');
+  fs.mkdirSync(baseDir, { recursive: true });
+  _stableTempDir = fs.mkdtempSync(path.join(baseDir, 'worker-'));
+  return _stableTempDir;
+}
+
+// Clean up temp dir on exit.
+process.on('exit', () => {
+  if (_stableTempDir) {
+    try { fs.rmSync(_stableTempDir, { recursive: true, force: true }); } catch {}
+  }
+});
+
 function getProjectModules(projectRoot) {
   if (_moduleCache.has(projectRoot)) {
     return _moduleCache.get(projectRoot);
@@ -70,6 +92,18 @@ async function main() {
         continue;
       }
       const { id } = request;
+
+      // Handle cache invalidation messages.
+      if (request.type === 'invalidate') {
+        if (request.componentPath) {
+          _bundleCache.delete(path.resolve(request.componentPath));
+        } else {
+          _bundleCache.clear();
+        }
+        process.stdout.write(JSON.stringify({ id, ok: true, invalidated: true }) + '\n');
+        continue;
+      }
+
       try {
         const result = await renderRequest(request);
         const response = JSON.stringify({ id, ok: true, ...result });
@@ -88,24 +122,38 @@ async function renderRequest({ componentPath, props, clientRoot, projectRoot: pr
     throw new Error('Missing componentPath in render request.');
   }
 
+  const resolvedComponentPath = path.resolve(componentPath);
   const workingDir = clientRoot ? path.resolve(clientRoot) : path.dirname(componentPath);
   const projectRoot = resolveProjectRoot(projectRootArg, workingDir, componentPath);
   if (!projectRoot) {
     throw new Error('Unable to determine project root for SSR render.');
   }
 
-  const { esbuild, React, ReactDOMServer } = getProjectModules(projectRoot);
+  const { React, ReactDOMServer } = getProjectModules(projectRoot);
 
+  // Fresh registries for each render (head elements depend on props/render).
   const styleRegistry = createStyleRegistry(projectRoot);
   globalThis.__PYXLE_REGISTER_SSR_STYLE__ = (entry) => styleRegistry.register(entry);
 
   const headRegistry = createHeadRegistry();
   globalThis.__PYXLE_HEAD_REGISTRY__ = headRegistry;
 
-  const tempDir = createProjectTempDir(projectRoot);
-  const outfile = path.join(tempDir, 'bundle.mjs');
+  let moduleExports;
+  const cached = _bundleCache.get(resolvedComponentPath);
 
-  try {
+  if (cached) {
+    // CACHE HIT: Skip esbuild entirely. Replay cached style descriptors.
+    moduleExports = cached.moduleExports;
+    for (const descriptor of cached.styleDescriptors) {
+      styleRegistry.register(descriptor);
+    }
+  } else {
+    // CACHE MISS: Run esbuild, then cache the result.
+    const { esbuild } = getProjectModules(projectRoot);
+    const tempDir = getStableTempDir(projectRoot);
+    const bundleHash = crypto.createHash('sha1').update(resolvedComponentPath).digest('hex');
+    const outfile = path.join(tempDir, `${bundleHash}.mjs`);
+
     await esbuild.build({
       entryPoints: [componentPath],
       bundle: true,
@@ -158,22 +206,27 @@ export default entry.contents;
     });
 
     const moduleUrl = pathToFileURL(outfile).href;
-    const moduleExports = await import(moduleUrl);
-    const Component = moduleExports.default ?? moduleExports.Component;
+    moduleExports = await import(moduleUrl);
 
-    if (typeof Component !== 'function') {
-      throw new Error('Component does not export a default function.');
-    }
-
-    const element = React.createElement(Component, props);
-    const html = ReactDOMServer.renderToString(element);
-    const styles = styleRegistry.list();
-    const headElements = headRegistry.list();
-
-    return { html, styles, headElements };
-  } finally {
-    fs.rmSync(tempDir, { recursive: true, force: true });
+    // Store in cache for subsequent requests.
+    _bundleCache.set(resolvedComponentPath, {
+      moduleExports,
+      styleDescriptors: styleRegistry.list(),
+    });
   }
+
+  const Component = moduleExports.default ?? moduleExports.Component;
+
+  if (typeof Component !== 'function') {
+    throw new Error('Component does not export a default function.');
+  }
+
+  const element = React.createElement(Component, props);
+  const html = ReactDOMServer.renderToString(element);
+  const styles = styleRegistry.list();
+  const headElements = headRegistry.list();
+
+  return { html, styles, headElements };
 }
 
 // --- Helpers (shared with render_component.mjs) ---

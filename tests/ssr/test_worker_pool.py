@@ -25,7 +25,11 @@ def anyio_backend() -> str:  # pragma: no cover - fixture wiring
 
 
 def _make_mock_process(responses: list[dict[str, Any]] | None = None) -> MagicMock:
-    """Return a fake asyncio subprocess whose stdout yields the given NDJSON responses."""
+    """Return a fake asyncio subprocess whose stdout yields the given NDJSON responses.
+
+    The mock provides both ``readline()`` (legacy) and ``read()`` (current)
+    so that the worker pool's chunk-based ``read_loop`` works correctly.
+    """
     proc = MagicMock()
     proc.stdin = MagicMock()
     proc.stdin.is_closing.return_value = False
@@ -33,23 +37,40 @@ def _make_mock_process(responses: list[dict[str, Any]] | None = None) -> MagicMo
     proc.stdin.drain = AsyncMock()
     proc.stdin.close = MagicMock()
 
-    # stdout.readline yields one encoded NDJSON line per call, then b"" (EOF)
+    # Build the full byte stream: each response as a JSON line, then EOF.
+    stream = b""
+    for r in responses or []:
+        stream += (json.dumps(r) + "\n").encode()
+
+    read_offset = [0]
+
+    async def _read(n: int = -1) -> bytes:
+        """Return up to *n* bytes from the stream, then b'' for EOF."""
+        if read_offset[0] >= len(stream):
+            await asyncio.sleep(0)
+            return b""
+        end = len(stream) if n < 0 else min(read_offset[0] + n, len(stream))
+        chunk = stream[read_offset[0]:end]
+        read_offset[0] = end
+        return chunk
+
+    # Also keep readline for any test that calls it directly.
     lines: list[bytes] = []
     for r in responses or []:
         lines.append((json.dumps(r) + "\n").encode())
-    lines.append(b"")  # EOF sentinel
-
-    call_count = [0]
+    lines.append(b"")
+    line_idx = [0]
 
     async def _readline() -> bytes:
-        idx = call_count[0]
+        idx = line_idx[0]
         if idx < len(lines):
-            call_count[0] += 1
+            line_idx[0] += 1
             return lines[idx]
         await asyncio.sleep(0)
         return b""
 
     proc.stdout = MagicMock()
+    proc.stdout.read = _read
     proc.stdout.readline = _readline
 
     async def _wait():
@@ -185,11 +206,11 @@ async def test_worker_state_read_loop_skips_already_done_future() -> None:
 
 @pytest.mark.anyio
 async def test_worker_state_read_loop_handles_exception_in_readline() -> None:
-    """read_loop should handle an exception from stdout.readline and mark worker dead."""
+    """read_loop should handle an exception from stdout.read and mark worker dead."""
     proc = MagicMock()
     proc.stdin = MagicMock()
     proc.stdout = MagicMock()
-    proc.stdout.readline = AsyncMock(side_effect=RuntimeError("stream broken"))
+    proc.stdout.read = AsyncMock(side_effect=RuntimeError("stream broken"))
     proc.wait = AsyncMock(return_value=1)
     proc.kill = MagicMock()
 
@@ -270,21 +291,23 @@ async def test_worker_state_stop_closes_stdin_and_waits() -> None:
 @pytest.mark.anyio
 async def test_worker_state_read_loop_skips_non_json_lines() -> None:
     """read_loop should silently skip lines that are not valid JSON."""
-    # Mix of a bad line and a good response
+    # Mix of a bad line and a good response — delivered as a single byte stream.
+    stream = b"not-json\n" + (json.dumps({"id": "abc", "ok": True, "html": "x"}) + "\n").encode()
+
     proc = MagicMock()
     proc.stdin = MagicMock()
-    lines = [b"not-json\n", (json.dumps({"id": "abc", "ok": True, "html": "x"}) + "\n").encode(), b""]
-    idx = [0]
+    offset = [0]
 
-    async def _readline():
-        if idx[0] < len(lines):
-            val = lines[idx[0]]
-            idx[0] += 1
-            return val
-        return b""
+    async def _read(n: int = -1) -> bytes:
+        if offset[0] >= len(stream):
+            return b""
+        end = len(stream) if n < 0 else min(offset[0] + n, len(stream))
+        chunk = stream[offset[0]:end]
+        offset[0] = end
+        return chunk
 
     proc.stdout = MagicMock()
-    proc.stdout.readline = _readline
+    proc.stdout.read = _read
     proc.wait = AsyncMock(return_value=0)
     proc.kill = MagicMock()
 
@@ -422,12 +445,12 @@ async def test_pool_render_dispatches_request(tmp_path: Path) -> None:
         "headElements": [],
     }
 
-    responses: list[dict[str, Any]] = []
+    responses: list[bytes] = []
 
-    async def fake_readline() -> bytes:
+    async def fake_read(n: int = -1) -> bytes:
         await asyncio.sleep(0)
         if responses:
-            return (json.dumps(responses.pop(0)) + "\n").encode()
+            return responses.pop(0)
         return b""
 
     mock_proc = MagicMock()
@@ -436,7 +459,7 @@ async def test_pool_render_dispatches_request(tmp_path: Path) -> None:
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.close = MagicMock()
     mock_proc.stdout = MagicMock()
-    mock_proc.stdout.readline = fake_readline
+    mock_proc.stdout.read = fake_read
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.kill = MagicMock()
 
@@ -445,7 +468,7 @@ async def test_pool_render_dispatches_request(tmp_path: Path) -> None:
         payload = json.loads(data.decode().strip())
         resp = dict(response_template)
         resp["id"] = payload["id"]
-        responses.append(resp)
+        responses.append((json.dumps(resp) + "\n").encode())
 
     mock_proc.stdin.write.side_effect = capture_write
     mock_proc.stdin.drain = AsyncMock()
@@ -478,12 +501,12 @@ async def test_pool_render_auto_starts_if_not_started(tmp_path: Path) -> None:
     component.parent.mkdir(parents=True)
     component.touch()
 
-    responses: list[dict[str, Any]] = []
+    responses: list[bytes] = []
 
-    async def fake_readline() -> bytes:
+    async def fake_read(n: int = -1) -> bytes:
         await asyncio.sleep(0)
         if responses:
-            return (json.dumps(responses.pop(0)) + "\n").encode()
+            return responses.pop(0)
         return b""
 
     mock_proc = MagicMock()
@@ -492,13 +515,13 @@ async def test_pool_render_auto_starts_if_not_started(tmp_path: Path) -> None:
     mock_proc.stdin.write = MagicMock()
     mock_proc.stdin.close = MagicMock()
     mock_proc.stdout = MagicMock()
-    mock_proc.stdout.readline = fake_readline
+    mock_proc.stdout.read = fake_read
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.kill = MagicMock()
 
     def capture_write(data: bytes) -> None:
         payload = json.loads(data.decode().strip())
-        responses.append({"id": payload["id"], "ok": True, "html": "<b/>", "styles": [], "headElements": []})
+        responses.append((json.dumps({"id": payload["id"], "ok": True, "html": "<b/>", "styles": [], "headElements": []}) + "\n").encode())
 
     mock_proc.stdin.write.side_effect = capture_write
     mock_proc.stdin.drain = AsyncMock()
@@ -866,3 +889,137 @@ async def test_worker_script_exists_and_is_valid_mjs() -> None:
         pytest.fail("ssr_worker.mjs did not exit after stdin was closed")
 
     assert returncode == 0, f"ssr_worker.mjs exited with code {returncode}"
+
+
+# ---------------------------------------------------------------------------
+# Invalidation tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_pool_invalidate_broadcasts_to_all_workers() -> None:
+    """invalidate() should send an invalidation message to every alive worker."""
+    proc1 = _make_mock_process([])
+    proc2 = _make_mock_process([])
+
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_spawn:
+        mock_spawn.side_effect = [proc1, proc2]
+        pool = SsrWorkerPool(
+            size=2,
+            project_root=Path("/tmp/proj"),
+            client_root=Path("/tmp/proj/client"),
+        )
+        await pool.start()
+
+    assert pool.alive_count == 2
+
+    captured1: list[dict] = []
+    captured2: list[dict] = []
+    _setup_dynamic_invalidation_response(proc1, captured1)
+    _setup_dynamic_invalidation_response(proc2, captured2)
+
+    await pool.invalidate()
+
+    # Both workers should have received an invalidation message.
+    assert len(captured1) == 1, "Worker 1 did not receive invalidation"
+    assert captured1[0].get("type") == "invalidate"
+    assert "componentPath" not in captured1[0]
+
+    assert len(captured2) == 1, "Worker 2 did not receive invalidation"
+    assert captured2[0].get("type") == "invalidate"
+
+    await pool.stop()
+
+
+@pytest.mark.anyio
+async def test_pool_invalidate_specific_component() -> None:
+    """invalidate(path) should include componentPath in the message."""
+    proc = _make_mock_process([])
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_spawn:
+        mock_spawn.return_value = proc
+        pool = SsrWorkerPool(
+            size=1,
+            project_root=Path("/tmp/proj"),
+            client_root=Path("/tmp/proj/client"),
+        )
+        await pool.start()
+
+    captured: list[dict] = []
+    _setup_dynamic_invalidation_response(proc, captured)
+
+    target = Path("/tmp/proj/pages/index.jsx")
+    await pool.invalidate(component_path=target)
+
+    assert len(captured) == 1
+    assert captured[0]["type"] == "invalidate"
+    assert captured[0]["componentPath"] == str(target.resolve())
+
+    await pool.stop()
+
+
+@pytest.mark.anyio
+async def test_pool_invalidate_tolerates_dead_workers() -> None:
+    """invalidate() should skip dead workers without raising."""
+    proc = _make_mock_process([])
+    with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_spawn:
+        mock_spawn.return_value = proc
+        pool = SsrWorkerPool(
+            size=1,
+            project_root=Path("/tmp/proj"),
+            client_root=Path("/tmp/proj/client"),
+        )
+        await pool.start()
+
+    # Kill the worker.
+    for w in pool._workers:
+        w.alive = False
+
+    # Should not raise.
+    await pool.invalidate()
+    await pool.stop()
+
+
+@pytest.mark.anyio
+async def test_pool_invalidate_before_start_is_noop() -> None:
+    """invalidate() on an unstarted pool should be a no-op."""
+    pool = SsrWorkerPool(
+        size=1,
+        project_root=Path("/tmp/proj"),
+        client_root=Path("/tmp/proj/client"),
+    )
+    # Should not raise.
+    await pool.invalidate()
+
+
+def _setup_dynamic_invalidation_response(
+    proc: MagicMock,
+    captured: list[dict] | None = None,
+) -> None:
+    """Patch a mock process so that stdin writes with type=invalidate get a
+    matching response on stdout.  Optionally appends received messages to *captured*."""
+    original_write = proc.stdin.write
+    pending_responses: list[bytes] = []
+
+    def _capturing_write(data: bytes) -> None:
+        original_write(data)
+        try:
+            msg = json.loads(data.decode())
+            if msg.get("type") == "invalidate":
+                if captured is not None:
+                    captured.append(msg)
+                resp = json.dumps({"id": msg["id"], "ok": True, "invalidated": True}) + "\n"
+                pending_responses.append(resp.encode())
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass
+
+    proc.stdin.write = _capturing_write
+
+    async def _read(n: int = -1) -> bytes:
+        # Drain pending invalidation responses first.
+        if pending_responses:
+            return pending_responses.pop(0)
+        # Then return EOF.
+        await asyncio.sleep(0)
+        return b""
+
+    proc.stdout.read = _read

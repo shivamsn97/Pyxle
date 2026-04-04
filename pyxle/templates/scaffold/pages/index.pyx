@@ -59,7 +59,7 @@ export default function HomePage({ data }) {
                     <a href="https://pyxle.dev" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">
                         Homepage
                     </a>
-                    <a href="https://github.com/shivamsn97/pyxle" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">
+                    <a href="https://github.com/pyxle-framework/pyxle" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">
                         GitHub
                     </a>
                     <a href="/api/pulse" target="_blank" rel="noreferrer" className="text-emerald-600 hover:underline">

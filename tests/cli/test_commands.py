@@ -970,8 +970,12 @@ def test_dev_command_ssr_workers_flag(monkeypatch) -> None:
             async def start(self) -> None:
                 pass
 
+        # Ensure DevServerSettings is populated so the lazy-import guard
+        # doesn't overwrite the monkeypatched DevServer.
+        from pyxle.devserver import DevServerSettings as _Real
+        monkeypatch.setattr("pyxle.cli.DevServerSettings", _Real)
         monkeypatch.setattr("pyxle.cli.DevServer", StubDevServer)
-        monkeypatch.setattr("pyxle.cli.asyncio.run", lambda coro: None)
+        monkeypatch.setattr("pyxle.cli.asyncio.run", lambda coro: coro.close())
 
         result = runner.invoke(
             app, ["dev", "demo", "--ssr-workers", "4"], catch_exceptions=False
@@ -1045,10 +1049,13 @@ def test_serve_command_ssr_workers_flag(monkeypatch) -> None:
         monkeypatch.setattr("pyxle.cli.load_manifest", lambda p: {"pages": {}, "generated_at": "2024-01-01"})
         monkeypatch.setattr("pyxle.cli.build_metadata_registry", lambda s: {})
         monkeypatch.setattr("pyxle.cli.build_route_table", lambda r: [])
-        monkeypatch.setattr("pyxle.cli.asyncio.run", lambda coro: None)
+        monkeypatch.setattr("pyxle.cli.asyncio.run", lambda coro: coro.close())
+
+        async def _noop_serve(self):
+            pass
 
         import uvicorn
-        monkeypatch.setattr(uvicorn, "Server", lambda cfg: type("S", (), {"serve": lambda s: None})())
+        monkeypatch.setattr(uvicorn, "Server", lambda cfg: type("S", (), {"serve": _noop_serve})())
 
         result = runner.invoke(
             app, ["serve", "demo", "--skip-build", "--ssr-workers", "3"], catch_exceptions=False

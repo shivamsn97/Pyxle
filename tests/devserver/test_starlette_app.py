@@ -626,3 +626,188 @@ def test_route_hooks_attach_metadata_and_custom_policies(
     api_response = client.get("/api/hook_check")
     assert api_response.status_code == 200
     assert api_response.json()["targets"] == ["api"]
+
+
+def test_dev_mode_adds_vite_cors_origin_automatically(
+    project: DevServerSettings,
+    monkeypatch,
+) -> None:
+    """In debug mode the Vite dev server origin should be allowed even without
+    explicit CORS configuration, so that HMR and asset requests succeed."""
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.ComponentRenderer",
+        lambda: object(),
+    )
+
+    async def fake_build_page_response(*, request, settings, page, renderer, overlay=None, **_kw):
+        return PlainTextResponse("page")
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.build_page_response",
+        fake_build_page_response,
+    )
+
+    # debug=True is the default from the fixture
+    assert project.debug is True
+    # Default vite_host is 127.0.0.1
+    assert project.vite_host == "127.0.0.1"
+
+    app = create_starlette_app(project, table)
+    client = TestClient(app)
+
+    vite_port = project.vite_port
+
+    # 127.0.0.1 origin should be allowed
+    response = client.get(
+        "/api/pulse",
+        headers={"Origin": f"http://127.0.0.1:{vite_port}"},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == f"http://127.0.0.1:{vite_port}"
+
+    # localhost should also be allowed (browsers treat them as different origins)
+    response = client.get(
+        "/api/pulse",
+        headers={"Origin": f"http://localhost:{vite_port}"},
+    )
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == f"http://localhost:{vite_port}"
+
+
+def test_dev_mode_cors_merges_with_user_config(
+    project: DevServerSettings,
+    monkeypatch,
+) -> None:
+    """When the user configures CORS origins, the Vite origin should be merged
+    in during debug mode without duplicating it."""
+    from pyxle.config import CorsConfig
+
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.ComponentRenderer",
+        lambda: object(),
+    )
+
+    async def fake_build_page_response(*, request, settings, page, renderer, overlay=None, **_kw):
+        return PlainTextResponse("page")
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.build_page_response",
+        fake_build_page_response,
+    )
+
+    user_origin = "https://example.com"
+    settings_with_cors = replace(
+        project,
+        cors=CorsConfig(origins=(user_origin,)),
+    )
+
+    app = create_starlette_app(settings_with_cors, table)
+    client = TestClient(app)
+
+    # User-configured origin should work
+    response = client.get("/api/pulse", headers={"Origin": user_origin})
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == user_origin
+
+    # Vite origin should also work (auto-merged)
+    vite_origin = f"http://{project.vite_host}:{project.vite_port}"
+    response = client.get("/api/pulse", headers={"Origin": vite_origin})
+    assert response.status_code == 200
+    assert response.headers.get("access-control-allow-origin") == vite_origin
+
+
+def test_production_mode_does_not_add_vite_cors(
+    project: DevServerSettings,
+    monkeypatch,
+) -> None:
+    """In production mode, no automatic Vite CORS origin should be injected."""
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    async def fake_build_page_response(*, request, settings, page, renderer, overlay=None, **_kw):
+        return PlainTextResponse("page")
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.build_page_response",
+        fake_build_page_response,
+    )
+
+    prod_settings = replace(project, debug=False)
+    app = create_starlette_app(prod_settings, table)
+    client = TestClient(app)
+
+    vite_origin = f"http://{prod_settings.vite_host}:{prod_settings.vite_port}"
+    response = client.get("/api/pulse", headers={"Origin": vite_origin})
+    assert response.status_code == 200
+    # No CORS header should be present — no CORS middleware in prod without config
+    assert response.headers.get("access-control-allow-origin") is None
+
+
+def test_dev_mode_cors_allows_localhost_when_bound_to_all_interfaces(
+    project: DevServerSettings,
+    monkeypatch,
+) -> None:
+    """When vite_host is 0.0.0.0, browsers send Origin as localhost or
+    127.0.0.1 — never the literal 0.0.0.0.  Both must be allowed."""
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.ComponentRenderer",
+        lambda: object(),
+    )
+
+    async def fake_build_page_response(*, request, settings, page, renderer, overlay=None, **_kw):
+        return PlainTextResponse("page")
+
+    monkeypatch.setattr(
+        "pyxle.devserver.starlette_app.build_page_response",
+        fake_build_page_response,
+    )
+
+    wildcard_settings = replace(project, vite_host="0.0.0.0")
+    app = create_starlette_app(wildcard_settings, table)
+    client = TestClient(app)
+
+    vite_port = wildcard_settings.vite_port
+
+    # localhost origin should be allowed
+    resp_localhost = client.get(
+        "/api/pulse",
+        headers={"Origin": f"http://localhost:{vite_port}"},
+    )
+    assert resp_localhost.status_code == 200
+    assert resp_localhost.headers.get("access-control-allow-origin") == f"http://localhost:{vite_port}"
+
+    # 127.0.0.1 origin should also be allowed
+    resp_loopback = client.get(
+        "/api/pulse",
+        headers={"Origin": f"http://127.0.0.1:{vite_port}"},
+    )
+    assert resp_loopback.status_code == 200
+    assert resp_loopback.headers.get("access-control-allow-origin") == f"http://127.0.0.1:{vite_port}"
+
+    # LAN IP origin should also be allowed (regex match on port)
+    resp_lan = client.get(
+        "/api/pulse",
+        headers={"Origin": f"http://192.168.1.42:{vite_port}"},
+    )
+    assert resp_lan.status_code == 200
+    assert resp_lan.headers.get("access-control-allow-origin") == f"http://192.168.1.42:{vite_port}"
+
+    # Wrong port should NOT match
+    resp_wrong_port = client.get(
+        "/api/pulse",
+        headers={"Origin": f"http://localhost:{vite_port + 1}"},
+    )
+    assert resp_wrong_port.headers.get("access-control-allow-origin") is None

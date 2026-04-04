@@ -1,14 +1,7 @@
-# CLAUDE.md — Pyxle Framework Development Guide
+# CLAUDE.md — Pyxle Core Framework
 
-This file instructs Claude (and any AI agent) on how to work on the Pyxle core framework.
+This file covers technical rules for the Pyxle core framework.
 Every rule here exists to keep Pyxle enterprise-grade, stable, and maintainable.
-
-## Related Repositories
-
-Pyxle is split across multiple repos. This is the **core framework**. Related repos:
-- `pyxle-langkit` — LSP server, linter, and VS Code extension (depends on this repo)
-- `pyxle-plugins` — Official plugins (auth, etc.) — each plugin depends on this repo
-- `pyxle-dev` — Private repo for the pyxle.dev website (a Pyxle app) (May not be available to external contributors)
 
 ---
 
@@ -257,11 +250,10 @@ After writing code:
 9. Mark the task as `[x]` in `ROADMAP.md`
 10. If you discovered new work needed, add it to the appropriate phase in `ROADMAP.md`
 
-### 23. Commit Instructions
+### 23. Commit Scope Convention
 
-Follow Conventional Commits: `feat`, `fix`, `refactor`, `test`, `chore`, `docs`.
-Scope is the primary module changed: `compiler`, `devserver`, `ssr`, `cli`, `runtime`,
-`client`, `build`, `routing`, `tests`, `scaffold`.
+Use the primary module changed as the commit scope: `compiler`, `devserver`, `ssr`, `cli`,
+`runtime`, `client`, `build`, `routing`, `tests`, `scaffold`.
 
 ### 24. Modifying the Compiler or Parser
 

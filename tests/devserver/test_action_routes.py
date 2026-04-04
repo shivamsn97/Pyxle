@@ -446,3 +446,196 @@ def test_action_only_accepts_post(tmp_path: Path) -> None:
     # GET should return 405
     response = client.get("/api/__actions/data/fetch")
     assert response.status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# Catch-all action routes for pages with dynamic/catch-all parameters
+# ---------------------------------------------------------------------------
+
+
+def _make_page_entry_with_alternates(
+    route_path: str,
+    alternate_route_paths: tuple[str, ...],
+    server_module_path: Path,
+    actions: tuple[dict, ...] = (),
+) -> PageRegistryEntry:
+    """Build a PageRegistryEntry with alternate route paths for testing."""
+    stub = Path("/stub/file.py")
+    return PageRegistryEntry(
+        route_path=route_path,
+        alternate_route_paths=alternate_route_paths,
+        source_relative_path=Path("pages/docs/[[...slug]].pyx"),
+        source_absolute_path=stub,
+        server_module_path=server_module_path,
+        client_module_path=stub,
+        metadata_path=stub,
+        client_asset_path="/pages/docs/[[...slug]].jsx",
+        server_asset_path="/pages/docs/[[...slug]].py",
+        module_key="pyxle.server.pages.docs.__slug__",
+        content_hash="abc123",
+        loader_name=None,
+        loader_line=None,
+        head_elements=(),
+        head_is_dynamic=False,
+        actions=actions,
+    )
+
+
+def test_action_routes_catchall_generated_for_dynamic_pages(
+    tmp_path: Path,
+) -> None:
+    """Pages with parameterised alternate paths should generate a catch-all."""
+    entry = _make_page_entry_with_alternates(
+        route_path="/docs",
+        alternate_route_paths=("/docs/{slug:path}",),
+        server_module_path=tmp_path / "docs.py",
+        actions=({"name": "search", "line": 5},),
+    )
+    routes = _action_routes(entry)
+    assert len(routes) == 2
+
+    specific = routes[0]
+    assert specific.path == "/api/__actions/docs/search"
+    assert specific.is_catchall is False
+    assert specific.action_name == "search"
+
+    catchall = routes[1]
+    assert "{_pyxle_action_path:path}" in catchall.path
+    assert catchall.is_catchall is True
+
+
+def test_action_routes_no_catchall_for_static_pages(tmp_path: Path) -> None:
+    """Pages without parameterised alternate paths should not get a catch-all."""
+    entry = _make_page_entry(
+        "/settings",
+        tmp_path / "settings.py",
+        actions=({"name": "save", "line": 5},),
+    )
+    routes = _action_routes(entry)
+    assert len(routes) == 1
+    assert routes[0].is_catchall is False
+
+
+def test_catchall_action_dispatch_success(tmp_path: Path) -> None:
+    """The catch-all handler must extract the action name from the last segment."""
+    module_path = _write_module(
+        tmp_path / "server" / "pages" / "docs.py",
+        """
+        from pyxle.runtime import action
+
+        @action
+        async def search_docs(request):
+            body = await request.json()
+            return {"results": [body.get("query")]}
+        """,
+    )
+
+    routes = [
+        ActionRoute(
+            path="/api/__actions/docs/search_docs",
+            page_path="/docs",
+            action_name="search_docs",
+            server_module_path=module_path,
+            module_key="pyxle.server.pages.docs",
+        ),
+        ActionRoute(
+            path="/api/__actions/docs/{_pyxle_action_path:path}",
+            page_path="/docs",
+            action_name="",
+            server_module_path=module_path,
+            module_key="pyxle.server.pages.docs",
+            is_catchall=True,
+        ),
+    ]
+    router = build_action_router(routes)
+
+    from starlette.applications import Starlette
+
+    app = Starlette()
+    app.router.routes.extend(router.routes)
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    # Direct route still works.
+    resp = client.post("/api/__actions/docs/search_docs", json={"query": "test"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+    # Catch-all route — simulates client sending from /docs/getting-started.
+    resp = client.post(
+        "/api/__actions/docs/getting-started/installation/search_docs",
+        json={"query": "routing"},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["results"] == ["routing"]
+
+
+def test_catchall_action_dispatch_missing_action(tmp_path: Path) -> None:
+    """The catch-all handler must return 404 for non-existent actions."""
+    module_path = _write_module(
+        tmp_path / "server" / "pages" / "docs2.py",
+        """
+        from pyxle.runtime import action
+
+        @action
+        async def real_action(request):
+            return {"ok": True}
+        """,
+    )
+
+    route = ActionRoute(
+        path="/api/__actions/docs/{_pyxle_action_path:path}",
+        page_path="/docs",
+        action_name="",
+        server_module_path=module_path,
+        module_key="pyxle.server.pages.docs2",
+        is_catchall=True,
+    )
+    router = build_action_router([route])
+
+    from starlette.applications import Starlette
+
+    app = Starlette()
+    app.router.routes.extend(router.routes)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/__actions/docs/some/path/nonexistent_action", json={},
+    )
+    assert resp.status_code == 404
+    assert resp.json()["ok"] is False
+
+
+def test_catchall_action_dispatch_untagged_rejected(tmp_path: Path) -> None:
+    """The catch-all handler must reject functions without @action."""
+    module_path = _write_module(
+        tmp_path / "server" / "pages" / "docs3.py",
+        """
+        async def not_an_action(request):
+            return {"sneaky": True}
+        """,
+    )
+
+    route = ActionRoute(
+        path="/api/__actions/docs/{_pyxle_action_path:path}",
+        page_path="/docs",
+        action_name="",
+        server_module_path=module_path,
+        module_key="pyxle.server.pages.docs3",
+        is_catchall=True,
+    )
+    router = build_action_router([route])
+
+    from starlette.applications import Starlette
+
+    app = Starlette()
+    app.router.routes.extend(router.routes)
+
+    client = TestClient(app, raise_server_exceptions=False)
+    resp = client.post(
+        "/api/__actions/docs/slug/not_an_action", json={},
+    )
+    assert resp.status_code == 400
+    assert resp.json()["ok"] is False

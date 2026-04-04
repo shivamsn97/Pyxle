@@ -175,9 +175,20 @@ def _render_client_runtime_index() -> str:
               if (candidate == null) {
                 return null;
               }
+              // Hash-only links (e.g. "#section") should scroll natively,
+              // not trigger client-side navigation.
+              if (typeof candidate === 'string' && candidate.startsWith('#')) {
+                return null;
+              }
               try {
                 const url = new URL(candidate, window.location.origin);
                 if (url.origin !== window.location.origin) {
+                  return null;
+                }
+                // Same-page hash change — let browser handle scroll.
+                if (url.pathname === window.location.pathname
+                    && url.search === window.location.search
+                    && url.hash && url.hash !== window.location.hash) {
                   return null;
                 }
                 return url;
@@ -761,6 +772,9 @@ def _render_client_entry(settings: DevServerSettings) -> str:
                 return `key:${key}`;
               }
               const tag = element.tagName?.toLowerCase?.() ?? '';
+              if (tag === 'title') {
+                return 'title';
+              }
               if (tag === 'meta') {
                 const name = element.getAttribute('name');
                 const property = element.getAttribute('property');
@@ -985,6 +999,22 @@ def _render_client_entry(settings: DevServerSettings) -> str:
             }
 
             function handleLinkClick(event) {
+              if (!event.defaultPrevented && event.button === 0 && !event.metaKey && !event.altKey && !event.ctrlKey && !event.shiftKey) {
+                const anchor = event.target?.closest?.('a[href]');
+                if (anchor && anchor.dataset.pyxleRouter !== 'off') {
+                  const rawHref = anchor.getAttribute('href') || '';
+                  if (rawHref.startsWith('#')) {
+                    event.preventDefault();
+                    const id = rawHref.slice(1);
+                    if (id) {
+                      const el = document.getElementById(id);
+                      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                    window.history.replaceState(window.history.state, '', rawHref);
+                    return;
+                  }
+                }
+              }
               const result = shouldHandleClick(event);
               if (!result) {
                 return;
@@ -994,10 +1024,10 @@ def _render_client_entry(settings: DevServerSettings) -> str:
             }
 
             function handlePopState(event) {
-              if (!event.state || !event.state.pyxle) {
-                window.location.reload();
-                return;
-              }
+              // Handle all popstate events via client navigation, including
+              // entries without pyxle state (e.g. from native <a href="#...">
+              // hash links). This avoids disruptive full-page reloads when
+              // navigating back/forward through hash-only history entries.
               navigateTo(new URL(window.location.href), {
                 updateHistory: false,
                 scroll: 'preserve',
@@ -1131,8 +1161,8 @@ def _render_client_entry(settings: DevServerSettings) -> str:
                 const nextPagePath = payload.page?.clientAssetPath ?? currentPagePath;
                 const nextProps = payload.props ?? {};
                 await prefetchModule(nextPagePath);
-                await renderPage(nextPagePath, nextProps);
                 updateHead(payload.headMarkup ?? '');
+                await renderPage(nextPagePath, nextProps);
 
                 if (options.updateHistory === false) {
                   window.history.replaceState({ pyxle: true, pagePath: nextPagePath }, '', `${url.pathname}${url.search}${url.hash}`);

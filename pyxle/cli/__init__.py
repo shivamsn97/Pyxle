@@ -680,10 +680,28 @@ def serve(
         public_static_dir = None
         client_mount_dir = None
 
+    # Create SSR worker pool for production (persistent Node.js processes
+    # with bundle caching eliminate per-request esbuild cost).
+    _pool = None
+    pool_size = settings.ssr_workers
+    if pool_size == 0:
+        import os as _os  # noqa: PLC0415
+
+        pool_size = min(_os.cpu_count() or 2, 4)
+    if pool_size > 0:
+        from pyxle.ssr.worker_pool import SsrWorkerPool  # noqa: PLC0415
+
+        _pool = SsrWorkerPool(
+            size=pool_size,
+            project_root=settings.project_root,
+            client_root=settings.client_build_dir,
+        )
+
     app = create_starlette_app(
         settings,
         route_table,
         logger=logger,
+        pool=_pool,
         public_static_dir=public_static_dir,
         client_static_dir=client_mount_dir,
         serve_static=serve_static,
@@ -691,7 +709,8 @@ def serve(
     app.state.pyxle_ready = True
 
     logger.info(
-        f"Serving Pyxle build on http://{settings.starlette_host}:{settings.starlette_port} (dist: {resolved_dist})"
+        f"Serving Pyxle build on http://{settings.starlette_host}:{settings.starlette_port} "
+        f"(dist: {resolved_dist}, ssr_workers: {pool_size})"
     )
 
     config = uvicorn.Config(

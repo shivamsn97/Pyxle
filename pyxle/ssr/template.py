@@ -14,6 +14,19 @@ from pyxle.devserver.styles import load_inline_stylesheets
 from .renderer import InlineStyleFragment
 
 
+def _browser_vite_origin(settings: DevServerSettings) -> str:
+    """Return a browser-connectable origin for the Vite dev server.
+
+    Bind addresses like ``0.0.0.0`` or ``::`` are valid for *listening* but
+    browsers cannot connect to them.  Replace with ``localhost`` so that
+    ``<script src="...">`` tags in the HTML actually resolve.
+    """
+    host = settings.vite_host
+    if host in ("0.0.0.0", "::", ""):
+        host = "localhost"
+    return f"http://{host}:{settings.vite_port}"
+
+
 @dataclass(frozen=True)
 class DocumentShell:
   """Represents the static prefix/suffix for an HTML document."""
@@ -125,7 +138,7 @@ def build_document_shell(
     )
     return DocumentShell(prefix=prefix, suffix=suffix)
 
-  vite_origin = f"http://{settings.vite_host}:{settings.vite_port}"
+  vite_origin = _browser_vite_origin(settings)
   react_refresh_preamble = _render_react_refresh_preamble(vite_origin, nonce_attr)
   before_interactive_scripts = _render_before_interactive_scripts(page.scripts, nonce_attr)
   scripts_metadata = _serialize_scripts_metadata(page.scripts)
@@ -242,7 +255,7 @@ def render_error_document(
 ) -> str:
     """Render a developer-friendly fallback when SSR fails."""
 
-    vite_origin = f"http://{settings.vite_host}:{settings.vite_port}"
+    vite_origin = _browser_vite_origin(settings)
     error_type = escape(error.__class__.__name__)
     message = escape(str(error) or str(error.__class__.__name__))
     page_path = escape(page.path)

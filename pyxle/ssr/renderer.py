@@ -270,16 +270,15 @@ def pool_render_factory(pool: Any) -> _RenderFactory:
     def factory(component_path: Path) -> _RenderCallable:
         async def _render(props: Dict[str, Any]) -> RenderResult:
             try:
-                serialized = json.dumps(props, ensure_ascii=False, separators=(",", ":"))
+                # Validate JSON-serializability without a redundant round-trip.
+                json.dumps(props, ensure_ascii=False, separators=(",", ":"))
             except (TypeError, ValueError) as exc:
                 raise ComponentRenderError(
                     f"Unable to serialize props for component '{component_path.name}'"
                 ) from exc
 
-            props_dict: Dict[str, Any] = json.loads(serialized)
-
             try:
-                result = await pool.render(component_path, props_dict)
+                result = await pool.render(component_path, props)
             except WorkerPoolError as exc:
                 raise ComponentRenderError(str(exc)) from exc
 

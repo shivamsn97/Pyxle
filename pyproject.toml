@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pyxle-framework"
-version = "0.1.1"
+version = "0.1.2"
 description = "Python-first full-stack framework with an intelligent CLI."
 readme = "README.md"
 authors = [
@@ -37,9 +37,9 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://pyxle.dev"
-Repository = "https://github.com/shivamsn97/pyxle"
-Documentation = "https://github.com/shivamsn97/pyxle/tree/main/docs"
-"Bug Tracker" = "https://github.com/shivamsn97/pyxle/issues"
+Repository = "https://github.com/pyxle-framework/pyxle"
+Documentation = "https://github.com/pyxle-framework/pyxle/tree/main/docs"
+"Bug Tracker" = "https://github.com/pyxle-framework/pyxle/issues"
 PyPI = "https://pypi.org/project/pyxle-framework/"
 
 [project.optional-dependencies]

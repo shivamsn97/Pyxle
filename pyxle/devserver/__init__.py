@@ -78,6 +78,12 @@ class DevServer:
 
         def _handle_rebuild(stats: WatcherStatistics) -> None:
             _maybe_schedule_reload(overlay, loop, stats)
+            # Invalidate SSR bundle caches in worker pool when files change.
+            if _pool is not None and stats.summary is not None and stats.summary.any_changes():
+                try:
+                    asyncio.run_coroutine_threadsafe(_pool.invalidate(), loop)
+                except RuntimeError:
+                    pass
         config = uvicorn.Config(
             app,
             host=settings.starlette_host,

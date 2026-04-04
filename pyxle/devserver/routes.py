@@ -50,6 +50,12 @@ class ActionRoute:
     Action endpoints accept ``POST /api/__actions/<page_path>/<action_name>``
     and dispatch to the corresponding ``@action``-decorated function in the
     page's server module.
+
+    For pages with catch-all or dynamic route parameters (e.g.
+    ``[[...slug]].pyx``), an additional catch-all action route is registered
+    so that URLs constructed from the full browser path still resolve.
+    These routes set ``is_catchall=True`` and extract the action name from
+    the last segment of the captured path at dispatch time.
     """
 
     path: str
@@ -57,6 +63,7 @@ class ActionRoute:
     action_name: str
     server_module_path: Path
     module_key: str
+    is_catchall: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -208,7 +215,13 @@ def _api_route(
 
 
 def _action_routes(entry: PageRegistryEntry) -> List[ActionRoute]:
-    """Build ``ActionRoute`` descriptors for each ``@action`` in a page entry."""
+    """Build ``ActionRoute`` descriptors for each ``@action`` in a page entry.
+
+    For pages with path-parameterised alternate routes (catch-all or dynamic
+    segments), an additional catch-all action route is appended so that the
+    client's ``useAction`` hook — which constructs the URL from the current
+    browser path — resolves correctly regardless of which sub-path is active.
+    """
     routes: List[ActionRoute] = []
     page_path = entry.route_path.rstrip("/") or "/"
 
@@ -216,6 +229,7 @@ def _action_routes(entry: PageRegistryEntry) -> List[ActionRoute]:
     # e.g. "/" -> "index", "/dashboard/settings" -> "dashboard/settings"
     page_segment = page_path.lstrip("/") or "index"
 
+    has_actions = False
     for action_info in entry.actions:
         if not isinstance(action_info, dict):
             continue
@@ -223,6 +237,7 @@ def _action_routes(entry: PageRegistryEntry) -> List[ActionRoute]:
         if not isinstance(action_name, str) or not action_name:
             continue
 
+        has_actions = True
         action_http_path = f"/api/__actions/{page_segment}/{action_name}"
         routes.append(
             ActionRoute(
@@ -233,6 +248,26 @@ def _action_routes(entry: PageRegistryEntry) -> List[ActionRoute]:
                 module_key=entry.module_key,
             )
         )
+
+    # For pages with path-parameterised alternate routes (e.g. catch-all
+    # ``[[...slug]]``), the client builds action URLs using the full browser
+    # path.  Register a catch-all action route that captures the trailing
+    # segments and extracts the action name from the last one.
+    if has_actions and any(
+        "{" in alt for alt in entry.alternate_route_paths
+    ):
+        catchall_path = f"/api/__actions/{page_segment}/{{_pyxle_action_path:path}}"
+        routes.append(
+            ActionRoute(
+                path=catchall_path,
+                page_path=page_path,
+                action_name="",
+                server_module_path=entry.server_module_path,
+                module_key=entry.module_key,
+                is_catchall=True,
+            )
+        )
+
     return routes
 
 
