@@ -217,10 +217,24 @@ def build_api_router(
 
 
 def _import_module(module_key: str, module_path: Path) -> ModuleType:
-    """Import a compiled module located at ``module_path`` under ``module_key``."""
+    """Import a compiled module located at ``module_path`` under ``module_key``.
+
+    Ensures the project root is on ``sys.path`` so that user-level imports
+    (e.g. ``from db import ...``) resolve without manual ``sys.path`` hacks.
+    """
 
     if module_key in sys.modules:
         del sys.modules[module_key]
+
+    # Compiled modules live under <project_root>/<build_dir>/server/...
+    # Walk up to the build-directory ancestor to find the project root.
+    resolved = module_path.resolve()
+    for parent in resolved.parents:
+        if parent.name.startswith(".pyxle"):
+            _root = str(parent.parent)
+            if _root not in sys.path:
+                sys.path.insert(0, _root)
+            break
 
     spec = importlib.util.spec_from_file_location(module_key, module_path)
     if spec is None or spec.loader is None:

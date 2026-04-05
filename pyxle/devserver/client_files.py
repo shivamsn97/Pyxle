@@ -185,6 +185,10 @@ def _render_client_runtime_index() -> str:
                 if (url.origin !== window.location.origin) {
                   return null;
                 }
+                // API routes and static files are not navigable pages.
+                if (url.pathname.startsWith('/api/') || /\\.[a-zA-Z0-9]+$/.test(url.pathname)) {
+                  return null;
+                }
                 // Same-page hash change — let browser handle scroll.
                 if (url.pathname === window.location.pathname
                     && url.search === window.location.search
@@ -1092,6 +1096,8 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               }
             }
 
+            const failedPrefetches = new Set();
+
             function prefetchNavigation(target) {
               const url = normalizeUrl(target);
               if (!url || url.origin !== window.location.origin) {
@@ -1101,13 +1107,16 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               if (navigationCache.has(cacheKey)) {
                 return Promise.resolve(true);
               }
+              if (failedPrefetches.has(cacheKey)) {
+                return Promise.resolve(false);
+              }
               if (navigationPromises.has(cacheKey)) {
                 return navigationPromises.get(cacheKey);
               }
               const promise = requestNavigationPayload(url, { useController: false })
                 .then(async (payload) => {
                   if (!payload) {
-                    navigationCache.delete(cacheKey);
+                    failedPrefetches.add(cacheKey);
                     return false;
                   }
                   const pagePath = payload.page?.clientAssetPath;
@@ -1201,6 +1210,11 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               }
               const url = normalizeUrl(href);
               if (!url || url.origin !== window.location.origin) {
+                return;
+              }
+              // Skip API routes and static files — only prefetch page routes.
+              const p = url.pathname;
+              if (p.startsWith('/api/') || /\.[a-zA-Z0-9]+$/.test(p)) {
                 return;
               }
               prefetchNavigation(url).catch(() => {});

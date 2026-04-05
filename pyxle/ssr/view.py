@@ -567,9 +567,28 @@ async def _navigation_error_response(
     return JSONResponse(payload, status_code=status_code)
 
 
+def _ensure_app_root_importable(module_path: Path) -> None:
+    """Add the project root to ``sys.path`` if not already present.
+
+    Compiled server modules live under
+    ``<project_root>/<build_dir>/server/pages/...``.  Walking up to the
+    build-directory ancestor and taking its parent gives the project root,
+    regardless of page nesting depth.
+    """
+    resolved = module_path.resolve()
+    for parent in resolved.parents:
+        if parent.name.startswith(".pyxle"):
+            project_root = str(parent.parent)
+            if project_root not in sys.path:
+                sys.path.insert(0, project_root)
+            return
+
+
 def _import_server_module(module_key: str, module_path: Path):
     if module_key in sys.modules:
         del sys.modules[module_key]
+
+    _ensure_app_root_importable(module_path)
 
     spec = importlib.util.spec_from_file_location(module_key, module_path)
     if spec is None or spec.loader is None:
