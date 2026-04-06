@@ -4,13 +4,6 @@ from datetime import datetime, timezone
 
 from pyxle import __version__
 
-HEAD = [
-    "<title>Pyxle App</title>",
-    '<meta name="description" content="A fresh Pyxle project." />',
-    '<link rel="icon" href="/favicon.ico" />',
-    '<link rel="stylesheet" href="/styles/tailwind.css" />',
-]
-
 
 @server
 async def load_home(request):
@@ -25,6 +18,7 @@ async def load_home(request):
 
 # --- client ---
 import React from 'react';
+import { Head } from 'pyxle/client';
 
 export const slots = {};
 export const createSlots = () => slots;
@@ -32,6 +26,12 @@ export const createSlots = () => slots;
 export default function HomePage({ data }) {
     return (
         <main className="flex min-h-screen flex-col items-center justify-center bg-slate-50 p-6 text-slate-900">
+            <Head>
+                <title>Pyxle App</title>
+                <meta name="description" content="A fresh Pyxle project." />
+                <link rel="icon" href="/favicon.ico" />
+                <link rel="stylesheet" href="/styles/tailwind.css" />
+            </Head>
             <div className="w-full max-w-md text-center">
                 <img
                     src="/branding/pyxle-mark.svg"
