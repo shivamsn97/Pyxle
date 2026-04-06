@@ -29,7 +29,7 @@ Multiple actions can exist in the same `.pyx` file alongside a `@server` loader.
 
 ### Using the `<Form>` component
 
-The simplest way to call an action. `<Form>` provides progressive enhancement -- it works with and without JavaScript:
+The simplest way to call an action from a form. `<Form>` collects the inputs, posts them to the action, and exposes `onSuccess` / `onError` callbacks:
 
 ```python
 @action
