@@ -254,26 +254,47 @@ def merge_head_elements(
     head_variable: tuple[str, ...],
     head_jsx_blocks: tuple[str, ...],
     layout_head_jsx_blocks: tuple[str, ...] = (),
+    runtime_head_blocks: tuple[str, ...] = (),
 ) -> tuple[str, ...]:
-    """Merge HEAD variable elements with JSX Head blocks with deduplication.
-    
+    """Merge HEAD elements from every source with deduplication.
+
     Precedence order (higher priority overrides lower):
-    1. Layout JSX blocks (lowest priority)
-    2. Page HEAD variable
-    3. Page JSX blocks (highest priority)
-    
-    Deduplication rules (higher priority always wins):
-    - <title>: Dedupe by tag name (page overrides layout)
-    - <meta name="X">: Dedupe by name attribute (page overrides layout)
-    - <meta property="X">: Dedupe by property attribute (page overrides layout)
-    - <link rel="X" href="Y">: Dedupe by rel + href (page overrides layout)
-    - <script src="X">: Dedupe by src (page overrides layout)
-    - data-head-key="X": Manual deduplication key (highest priority wins)
-    
-    Elements without dedupe keys are always included (e.g., preconnect links with no href conflict).
-    
-    Note: Head blocks may contain multiple HTML elements in a single string (from <Head>...</Head>
-    JSX blocks). This function splits them into individual elements before deduplication.
+
+    1. Layout JSX blocks — static extraction from ancestor ``layout.pyx``
+       and ``template.pyx`` files.
+    2. Page ``HEAD`` variable — server-side declaration in the page module.
+    3. Page JSX blocks — static extraction of ``<Head>`` blocks in the
+       page file at compile time.
+    4. Runtime ``<Head>`` registrations — produced when the ``<Head>``
+       component executes during SSR and calls ``renderToStaticMarkup``
+       on its children. These reflect the actual rendered output,
+       including evaluated JSX expressions, so they always win over
+       static extraction.
+
+    Deduplication rules (higher priority always wins, first occurrence
+    wins within the same priority):
+
+    - ``<title>`` — dedupe by tag name
+    - ``<meta name="X">`` — dedupe by ``name`` attribute
+    - ``<meta property="X">`` — dedupe by ``property`` attribute
+    - ``<meta charset>`` — only one allowed
+    - ``<link rel="canonical">`` — only one allowed
+    - ``<link rel="X" href="Y">`` — dedupe by ``rel`` + ``href``
+    - ``<script src="X">`` — dedupe by ``src``
+    - ``data-head-key="X"`` — manual deduplication key
+
+    Elements without a dedupe key are kept (e.g. preconnect links).
+
+    Note: Head blocks may contain multiple HTML elements in a single
+    string (from ``<Head>...</Head>`` JSX blocks). This function splits
+    them into individual elements before deduplication.
+
+    Runtime ordering note: ``runtime_head_blocks`` arrives in React
+    render order (outer layouts register first, the page registers
+    last). We process this list in *reverse* so the deepest registration
+    (the page) is examined first and wins via the standard
+    "first-occurrence-wins-within-priority" rule. This matches the
+    react-helmet convention that components closer to the leaf win.
     """
 
     # Dictionary: dedupe_key -> (html, priority)
@@ -292,6 +313,14 @@ def merge_head_elements(
     for block in head_jsx_blocks:
         for el in _split_head_block_into_elements(block):
             page_elements.append(sanitize_head_element(el))
+
+    # Runtime blocks: reversed so the deepest (page) registration is
+    # processed first and wins over outer (layout) registrations within
+    # the same priority tier. See the docstring for rationale.
+    runtime_elements = []
+    for block in reversed(runtime_head_blocks):
+        for el in _split_head_block_into_elements(block):
+            runtime_elements.append(sanitize_head_element(el))
 
     # Priority 1: Layout JSX blocks (lowest priority)
     for element in layout_elements:
@@ -320,7 +349,7 @@ def merge_head_elements(
                 # Override if this is the first occurrence or has higher priority
                 seen_keys[dedupe_key] = (element, 2)
 
-    # Priority 3: Page JSX blocks (highest priority)
+    # Priority 3: Page JSX blocks (static compile-time extraction)
     for element in page_elements:
         element = element.strip()
         if element:
@@ -331,6 +360,22 @@ def merge_head_elements(
             elif dedupe_key not in seen_keys or seen_keys[dedupe_key][1] < 3:
                 # Override if this is the first occurrence or has higher priority
                 seen_keys[dedupe_key] = (element, 3)
+
+    # Priority 4: Runtime <Head> registrations (highest priority)
+    #
+    # These come from <Head> components executing during SSR. They
+    # contain fully evaluated JSX (including expressions like
+    # ``{pageTitle}``) and therefore always supersede the static
+    # extraction in priority 3 when the same dedupe key is present.
+    for element in runtime_elements:
+        element = element.strip()
+        if element:
+            dedupe_key = _extract_dedupe_key(element)
+            if dedupe_key is None:
+                # No dedupe key, always add to result later
+                pass
+            elif dedupe_key not in seen_keys or seen_keys[dedupe_key][1] < 4:
+                seen_keys[dedupe_key] = (element, 4)
 
     # Build result: include all deduped elements in order, plus non-deupeable items
     result: list[str] = []
@@ -348,6 +393,11 @@ def merge_head_elements(
             non_deupeable.append(element)
 
     for element in page_elements:
+        element = element.strip()
+        if element and _extract_dedupe_key(element) is None:
+            non_deupeable.append(element)
+
+    for element in runtime_elements:
         element = element.strip()
         if element and _extract_dedupe_key(element) is None:
             non_deupeable.append(element)

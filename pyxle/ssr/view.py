@@ -451,8 +451,9 @@ async def _create_page_artifacts(
     
     merged_head_elements = merge_head_elements(
         head_variable=head_elements,
-        head_jsx_blocks=page.head_jsx_blocks + tuple(runtime_head_blocks),
+        head_jsx_blocks=page.head_jsx_blocks,
         layout_head_jsx_blocks=layout_head_jsx_blocks,
+        runtime_head_blocks=tuple(runtime_head_blocks),
     )
     
     head_markup = render_head_markup(merged_head_elements)

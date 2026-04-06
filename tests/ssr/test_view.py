@@ -1143,6 +1143,57 @@ def test_purge_page_modules_handles_missing_dir(tmp_path: Path) -> None:
     _purge_page_modules(tmp_path / "nonexistent")
 
 
+@pytest.mark.anyio
+async def test_runtime_head_overrides_static_dynamic_title(
+    settings: DevServerSettings, tmp_path: Path,
+) -> None:
+    """Regression: a dynamic ``<title>{expression}</title>`` inside a
+    ``<Head>`` block must render the runtime-evaluated value, not the
+    literal source text captured at compile time.
+
+    The compiler stores ``<title>{pageTitle}</title>`` verbatim in
+    ``page.head_jsx_blocks``. The Head component, when rendered, calls
+    ``renderToStaticMarkup`` and produces ``<title>Installation</title>``,
+    which is forwarded as a runtime head block. The merger must give the
+    runtime version precedence so the literal ``{pageTitle}`` never
+    leaks into the rendered HTML.
+    """
+    page = replace(
+        _page_route(tmp_path, loader_name=None),
+        head_elements=(),
+        head_is_dynamic=False,
+        head_jsx_blocks=("<title>{pageTitle}</title>",),
+    )
+
+    renderer = StubRenderer()
+    renderer.responses.append(
+        RenderResult(
+            html="<main>doc</main>",
+            head_elements=("<title>Installation - Pyxle Docs</title>",),
+        )
+    )
+    request = Request({
+        "type": "http",
+        "http_version": "1.1",
+        "method": "GET",
+        "path": "/",
+        "root_path": "",
+        "headers": [],
+    })
+
+    response = await build_page_response(
+        request=request,
+        settings=settings,
+        page=page,
+        renderer=renderer,
+    )
+
+    body = (await _read_response_body(response)).decode()
+    assert response.status_code == 200
+    assert "<title>Installation - Pyxle Docs</title>" in body
+    assert "{pageTitle}" not in body
+
+
 def test_import_server_module_loads_and_registers(tmp_path: Path) -> None:
     """_import_server_module loads the module and registers it in sys.modules."""
     from pyxle.ssr.view import _import_server_module

@@ -379,11 +379,161 @@ def test_merge_multi_element_head_blocks():
     # Should have only ONE title (page's title wins)
     title_count = sum(1 for elem in result if '<title>' in elem)
     assert title_count == 1
-    
+
     # The title should be from page, not layout
     titles = [elem for elem in result if '<title>' in elem]
     assert 'Page Title' in titles[0]
     assert 'Layout Title' not in titles[0]
+
+
+# ---------------------------------------------------------------------------
+# Runtime <Head> registrations (priority 4 — highest)
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_title_overrides_static_page_title():
+    """Runtime <Head> registration must override static page extraction.
+
+    The compile-time extraction captures literal source text including
+    unevaluated expressions; the runtime registration is the React-rendered
+    output. Runtime is therefore always more accurate.
+    """
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=("<title>{pageTitle}</title>",),
+        runtime_head_blocks=("<title>Installation - Pyxle Docs</title>",),
+    )
+
+    titles = [elem for elem in result if "<title>" in elem]
+    assert len(titles) == 1
+    assert titles[0] == "<title>Installation - Pyxle Docs</title>"
+
+
+def test_runtime_title_overrides_head_variable():
+    """Runtime registration takes precedence over the HEAD variable."""
+    result = merge_head_elements(
+        head_variable=("<title>From HEAD</title>",),
+        head_jsx_blocks=(),
+        runtime_head_blocks=("<title>From Runtime</title>",),
+    )
+
+    assert result == ("<title>From Runtime</title>",)
+
+
+def test_runtime_title_overrides_layout_static_title():
+    """Runtime registration beats layout static extraction."""
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=(),
+        layout_head_jsx_blocks=("<title>Layout Title</title>",),
+        runtime_head_blocks=("<title>Runtime Title</title>",),
+    )
+
+    assert result == ("<title>Runtime Title</title>",)
+
+
+def test_runtime_blocks_reversed_so_page_wins_over_layout():
+    """Within runtime blocks, the page registration (last in render order)
+    must win over outer layout registrations (first in render order).
+
+    React renders outer-to-inner, so a layout's <Head> registers before
+    the page's <Head>. The merger reverses the runtime list so the
+    deepest registration is processed first and wins.
+    """
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=(),
+        # Registration order: outer layout → inner layout → page.
+        runtime_head_blocks=(
+            "<title>Outer Layout Title</title>",
+            "<title>Inner Layout Title</title>",
+            "<title>Page Title</title>",
+        ),
+    )
+
+    assert result == ("<title>Page Title</title>",)
+
+
+def test_runtime_empty_falls_back_to_static_page():
+    """When runtime is empty, static page extraction still applies."""
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=("<title>Static Title</title>",),
+        runtime_head_blocks=(),
+    )
+
+    assert result == ("<title>Static Title</title>",)
+
+
+def test_runtime_empty_falls_back_to_head_variable():
+    """When runtime and static page are empty, HEAD variable is used."""
+    result = merge_head_elements(
+        head_variable=("<title>HEAD Title</title>",),
+        head_jsx_blocks=(),
+        runtime_head_blocks=(),
+    )
+
+    assert result == ("<title>HEAD Title</title>",)
+
+
+def test_runtime_meta_overrides_static_meta_by_name():
+    """Runtime meta tag overrides static meta with the same name."""
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=('<meta name="description" content="static" />',),
+        runtime_head_blocks=('<meta name="description" content="runtime" />',),
+    )
+
+    descriptions = [elem for elem in result if 'name="description"' in elem]
+    assert len(descriptions) == 1
+    assert 'content="runtime"' in descriptions[0]
+
+
+def test_runtime_only_supplies_dynamic_static_supplies_rest():
+    """Runtime can supply only the dynamic title while static supplies
+    the rest of the head; both should appear in the output."""
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=(
+            '<meta name="viewport" content="width=device-width, initial-scale=1" />'
+            '<link rel="icon" href="/favicon.svg" />',
+        ),
+        runtime_head_blocks=("<title>Dynamic Title</title>",),
+    )
+
+    assert any("<title>Dynamic Title</title>" == elem for elem in result)
+    assert any('name="viewport"' in elem for elem in result)
+    assert any('rel="icon"' in elem for elem in result)
+
+
+def test_runtime_block_with_multiple_elements():
+    """A single runtime block containing multiple elements should be
+    split and each element merged independently."""
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=("<title>Static Title</title>",),
+        runtime_head_blocks=(
+            '<title>Runtime Title</title><meta name="description" content="d" />',
+        ),
+    )
+
+    titles = [elem for elem in result if "<title>" in elem]
+    assert len(titles) == 1
+    assert titles[0] == "<title>Runtime Title</title>"
+    assert any('name="description"' in elem for elem in result)
+
+
+def test_runtime_non_keyed_element_appears_in_output():
+    """Runtime elements without a dedupe key (e.g., a script with no src)
+    should still be included in the output."""
+    inline_script = '<script>console.log("hi")</script>'
+    result = merge_head_elements(
+        head_variable=(),
+        head_jsx_blocks=(),
+        runtime_head_blocks=(inline_script,),
+    )
+
+    assert any("console.log" in elem for elem in result)
 
 
 
