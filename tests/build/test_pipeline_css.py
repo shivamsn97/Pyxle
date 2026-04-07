@@ -155,6 +155,133 @@ def test_build_page_manifest_handles_missing_vite_manifest(tmp_path: Path) -> No
     assert page_manifest["/"]["client"]["css"] == []
 
 
+def test_build_page_manifest_walks_imports_chain_for_layout_css(tmp_path: Path) -> None:
+    """When CSS is imported from a layout (or any chunk the page pulls in
+    transitively), the hashed stylesheet lands on that chunk's manifest
+    entry, not on the page's own entry. Pyxle must walk the `imports`
+    chain so the page still gets the CSS link in production HTML.
+
+    This is the real-world case that pyxle-dev hit: one
+    ``import './styles/tailwind.css';`` in ``pages/layout.pyx`` produces a
+    single hashed bundle referenced from the layout chunk; every page
+    imports the layout chunk but has its own empty ``css`` array. Without
+    transitive collection, production renders with zero ``<link>`` tags
+    and the site is unstyled.
+    """
+
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = DevServerSettings.from_project_root(project)
+
+    registry = MetadataRegistry(pages=[_make_page("/", project=project)], apis=[])
+    vite_manifest = {
+        "pages/index.jsx": {
+            "file": "assets/index-DEADBEEF.js",
+            "imports": ["_layout-ABCD.js"],
+            "css": [],  # Page has no direct CSS.
+        },
+        "_layout-ABCD.js": {
+            "file": "assets/layout-ABCD.js",
+            "imports": [],
+            "css": ["assets/layout-CAFEBABE.css"],  # Layout owns the CSS.
+        },
+    }
+
+    page_manifest = _build_page_manifest(
+        settings, registry, vite_manifest=vite_manifest
+    )
+
+    assert page_manifest["/"]["client"]["css"] == [
+        "dist/assets/layout-CAFEBABE.css",
+    ], (
+        "Page manifest must include CSS imported from the layout chunk "
+        "via the Vite `imports` chain. An empty list here means the SSR "
+        "template will render zero <link> tags and the site will be unstyled."
+    )
+
+
+def test_build_page_manifest_dedupes_css_across_imports_chain(tmp_path: Path) -> None:
+    """Multiple chunks in the imports chain may reference the same CSS file
+    (e.g. a shared stylesheet pulled in by both a layout and a component).
+    The page manifest must dedupe while preserving first-seen order.
+    """
+
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = DevServerSettings.from_project_root(project)
+
+    registry = MetadataRegistry(pages=[_make_page("/", project=project)], apis=[])
+    vite_manifest = {
+        "pages/index.jsx": {
+            "file": "assets/index.js",
+            "imports": ["_layout.js", "_shared.js"],
+            "css": ["assets/page.css"],
+        },
+        "_layout.js": {
+            "file": "assets/layout.js",
+            "imports": ["_shared.js"],
+            "css": ["assets/layout.css", "assets/shared.css"],
+        },
+        "_shared.js": {
+            "file": "assets/shared.js",
+            "imports": [],
+            "css": ["assets/shared.css"],  # Duplicate — also referenced from layout.
+        },
+    }
+
+    page_manifest = _build_page_manifest(
+        settings, registry, vite_manifest=vite_manifest
+    )
+
+    css = page_manifest["/"]["client"]["css"]
+    assert css == [
+        "dist/assets/page.css",
+        "dist/assets/layout.css",
+        "dist/assets/shared.css",
+    ], css
+    # Explicit dedupe check so a regression is obvious.
+    assert len(css) == len(set(css))
+
+
+def test_build_page_manifest_handles_import_cycles(tmp_path: Path) -> None:
+    """Vite manifests can contain cycles in rare cases (circular imports
+    between chunks). The walker must terminate rather than loop forever.
+    """
+
+    project = tmp_path / "project"
+    project.mkdir()
+    settings = DevServerSettings.from_project_root(project)
+
+    registry = MetadataRegistry(pages=[_make_page("/", project=project)], apis=[])
+    vite_manifest = {
+        "pages/index.jsx": {
+            "file": "assets/index.js",
+            "imports": ["_a.js"],
+            "css": [],
+        },
+        "_a.js": {
+            "file": "assets/a.js",
+            "imports": ["_b.js"],
+            "css": ["assets/a.css"],
+        },
+        "_b.js": {
+            "file": "assets/b.js",
+            "imports": ["_a.js"],  # Cycle back to _a.js
+            "css": ["assets/b.css"],
+        },
+    }
+
+    page_manifest = _build_page_manifest(
+        settings, registry, vite_manifest=vite_manifest
+    )
+
+    # Both CSS files are collected exactly once; the walker exits instead
+    # of looping forever.
+    assert sorted(page_manifest["/"]["client"]["css"]) == sorted(
+        ["dist/assets/a.css", "dist/assets/b.css"]
+    )
+
+
 def test_build_page_manifest_propagates_css_to_aliased_routes(tmp_path: Path) -> None:
     """Pages with alternate route paths (e.g. catch-all routes) must share
     the same CSS asset list as the canonical route.

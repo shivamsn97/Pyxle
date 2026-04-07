@@ -208,6 +208,57 @@ def _load_vite_manifest(settings: DevServerSettings) -> Dict[str, Any] | None:
     return None
 
 
+def _collect_css_from_vite_entry(
+    vite_manifest: Dict[str, Any],
+    entry_key: str,
+) -> list[str]:
+    """Transitively collect every CSS asset reachable from a Vite manifest entry.
+
+    Vite's `manifest.json` stores each chunk's CSS dependencies on the chunk
+    that directly imports the stylesheet. When a stylesheet is imported from
+    a layout or shared component (not from the page file itself), the CSS
+    ends up on the layout/shared chunk and only the layout's `imports` chain
+    connects it back to the page. This walker follows the `imports` chain of
+    a page entry, deduplicates, and returns the union of every reachable
+    chunk's `css` array so the SSR template can emit one `<link>` tag per
+    stylesheet regardless of where the import originated.
+
+    Order is preserved: the direct entry's CSS appears first, followed by
+    CSS from imports in depth-first order. Duplicates are removed while
+    preserving first-seen order.
+    """
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    visited_keys: set[str] = set()
+    stack: list[str] = [entry_key]
+
+    while stack:
+        key = stack.pop(0)
+        if key in visited_keys:
+            continue
+        visited_keys.add(key)
+
+        entry = vite_manifest.get(key)
+        if not isinstance(entry, dict):
+            continue
+
+        css_list = entry.get("css")
+        if isinstance(css_list, list):
+            for asset in css_list:
+                if isinstance(asset, str) and asset not in seen:
+                    seen.add(asset)
+                    collected.append(asset)
+
+        imports = entry.get("imports")
+        if isinstance(imports, list):
+            for imported_key in imports:
+                if isinstance(imported_key, str) and imported_key not in visited_keys:
+                    stack.append(imported_key)
+
+    return collected
+
+
 def _build_page_manifest(
     settings: DevServerSettings,
     registry: MetadataRegistry,
@@ -231,9 +282,11 @@ def _build_page_manifest(
                 vite_file = vite_entry.get("file", "")
                 if vite_file:
                     client_file = f"dist/{vite_file}"
-                vite_css = vite_entry.get("css")
-                if isinstance(vite_css, list):
-                    css_assets = [f"dist/{c}" for c in vite_css if isinstance(c, str)]
+
+                # Walk the imports chain so CSS imported from layouts or
+                # shared component chunks still lands on this page's entry.
+                vite_css = _collect_css_from_vite_entry(vite_manifest, vite_key)
+                css_assets = [f"dist/{c}" for c in vite_css]
 
         entry: Dict[str, Any] = {
             "client": {
