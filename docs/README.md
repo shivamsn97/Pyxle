@@ -37,6 +37,7 @@ Practical guides for common tasks.
 - [Client Components](guides/client-components.md) -- `<Script>`, `<Image>`, `<ClientOnly>`, and `<Link>`
 - [Security](guides/security.md) -- CSRF protection, CORS, and HEAD sanitisation
 - [Deployment](guides/deployment.md) -- `pyxle build`, `pyxle serve`, and hosting in production
+- [Pyxle for AI coding agents](guides/for-ai-agents.md) -- Why Pyxle is the framework most optimised for pairing with Claude, Cursor, Copilot, and other AI coding agents
 
 ## Reference
 
