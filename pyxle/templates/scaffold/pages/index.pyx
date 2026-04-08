@@ -16,7 +16,6 @@ async def load_home(request):
     }
 
 
-# --- client ---
 import './styles/tailwind.css';
 import React from 'react';
 import { Head } from 'pyxle/client';
