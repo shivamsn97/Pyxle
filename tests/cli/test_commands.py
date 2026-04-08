@@ -1157,6 +1157,219 @@ def test_check_command_fails_on_missing_project() -> None:
     assert result.exit_code == 1
 
 
+def test_check_command_reports_multiple_diagnostics_per_file() -> None:
+    """``pyxle check`` runs in tolerant mode so a single page with
+    multiple errors reports all of them in one pass."""
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir()
+        # This file has TWO distinct semantic errors:
+        #   1. @server function is not async
+        #   2. @action function is not async
+        (project / "pages" / "broken.pyx").write_text(
+            "@server\n"
+            "def bad_loader(request):\n"
+            "    return {}\n"
+            "\n"
+            "@action\n"
+            "def bad_action(request):\n"
+            "    return {}\n"
+            "\n"
+            "export default function P() { return <div />; }\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["check", "demo"], catch_exceptions=False)
+
+        assert result.exit_code == 1
+        # Both errors are reported.
+        out = result.stdout
+        assert "must be declared as async" in out
+        # Verify we got at least 2 distinct error lines (one per error,
+        # not just one per file). The check command writes one
+        # diagnostic line per error.
+        async_count = out.count("async")
+        assert async_count >= 2
+
+
+def test_check_command_reports_diagnostic_section_and_line() -> None:
+    """``pyxle check`` output annotates each diagnostic with its section
+    and source line."""
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir()
+        (project / "pages" / "broken.pyx").write_text(
+            "@server\n"
+            "def bad_loader(request):\n"
+            "    return {}\n"
+            "\n"
+            "export default function P() { return <div />; }\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["check", "demo"], catch_exceptions=False)
+
+        assert result.exit_code == 1
+        # Section name is included in the output.
+        assert "[python]" in result.stdout
+        # Line number is included.
+        assert "line 2" in result.stdout
+
+
+def test_check_command_reports_jsx_syntax_errors() -> None:
+    """``pyxle check`` passes ``validate_jsx=True`` so JSX syntax
+    problems (e.g. unclosed tags, mismatched braces) surface as
+    ``[jsx]`` diagnostics alongside Python errors. Previously JSX
+    errors were silently passed through to the build step.
+    """
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir()
+        # Invalid JSX: const declaration inside a JSX expression is
+        # a parse error. Babel rejects this immediately.
+        (project / "pages" / "bad-jsx.pyx").write_text(
+            "import React from 'react';\n"
+            "\n"
+            "export default function Page() {\n"
+            "    return <div>{const x = 1}</div>;\n"
+            "}\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["check", "demo"], catch_exceptions=False)
+
+        # The check should fail with a [jsx] diagnostic. Babel must be
+        # available for this path to produce an error; if Node is
+        # missing the test environment won't catch the issue and the
+        # assertion would fail — that's intentional, it signals that
+        # validate_jsx needs Node to work.
+        assert result.exit_code == 1
+        assert "[jsx]" in result.stdout
+
+
+def test_check_command_survives_per_file_parser_crash(monkeypatch) -> None:
+    """A single file that crashes the parser must NOT abort the
+    entire ``pyxle check`` run. The CLI defensively wraps each
+    per-file parse so a crash on file A still lets files B and C
+    report their diagnostics. The crash is itself reported as a
+    ``[python] parser crashed`` diagnostic.
+    """
+    from pyxle.compiler import parser as parser_module
+
+    real_parse = parser_module.PyxParser.parse
+    crash_target = "crashy.pyx"
+
+    def fake_parse(self, source_path, *, tolerant=False, validate_jsx=False):
+        if source_path.name == crash_target:
+            raise RuntimeError("simulated parser crash")
+        return real_parse(
+            self,
+            source_path,
+            tolerant=tolerant,
+            validate_jsx=validate_jsx,
+        )
+
+    monkeypatch.setattr(parser_module.PyxParser, "parse", fake_parse)
+
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir()
+        # Two files. The first one will crash the parser; the second
+        # is valid and must still be checked.
+        (project / "pages" / crash_target).write_text(
+            "import React from 'react';\n"
+            "export default function P() { return <div />; }\n",
+            encoding="utf-8",
+        )
+        (project / "pages" / "ok.pyx").write_text(
+            "import React from 'react';\n"
+            "export default function Q() { return <div />; }\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["check", "demo"], catch_exceptions=False)
+
+        # Crash is reported as a diagnostic, not propagated.
+        assert "parser crashed" in result.stdout
+        assert "RuntimeError" in result.stdout
+        # The CLI says it checked BOTH files (crash didn't abort
+        # iteration).
+        assert "Checked 2 .pyx file(s)" in result.stdout
+
+
+def test_check_command_warns_missing_package_json() -> None:
+    """``pyxle check`` warns when package.json is missing."""
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir()
+        (project / "node_modules").mkdir()
+        (project / "pages" / "index.pyx").write_text(
+            "import React from 'react';\n"
+            "export default function P() { return <div />; }\n",
+            encoding="utf-8",
+        )
+
+        result = runner.invoke(app, ["check", "demo"], catch_exceptions=False)
+
+        assert result.exit_code == 0
+        assert "package.json" in result.stdout
+
+
+def test_check_command_handles_diagnostic_without_line() -> None:
+    """``pyxle check`` output handles diagnostics that have no line info."""
+    # Some diagnostics carry no source line (e.g. structural errors at
+    # the file level). We patch the parser to emit one such diagnostic
+    # and verify the CLI formats it without crashing on the missing line.
+    from pyxle.compiler.parser import PyxDiagnostic, PyxParseResult
+
+    def fake_parse(self, path, *, tolerant=False, validate_jsx=False):
+        return PyxParseResult(
+            python_code="",
+            jsx_code="",
+            loader=None,
+            python_line_numbers=(),
+            jsx_line_numbers=(),
+            head_elements=(),
+            head_is_dynamic=False,
+            diagnostics=(
+                PyxDiagnostic(
+                    section="structural",
+                    severity="error",
+                    message="file-level diagnostic without a line",
+                    line=None,
+                ),
+            ),
+        )
+
+    with runner.isolated_filesystem():
+        project = Path("demo")
+        (project / "pages").mkdir(parents=True)
+        (project / "public").mkdir()
+        (project / "pages" / "page.pyx").write_text(
+            "import React from 'react';\n"
+            "export default function P() { return <div />; }\n",
+            encoding="utf-8",
+        )
+
+        from pyxle.compiler.parser import PyxParser
+
+        original = PyxParser.parse
+        PyxParser.parse = fake_parse  # type: ignore[assignment]
+        try:
+            result = runner.invoke(app, ["check", "demo"], catch_exceptions=False)
+        finally:
+            PyxParser.parse = original  # type: ignore[assignment]
+
+        assert result.exit_code == 1
+        assert "[structural]" in result.stdout
+        assert "file-level diagnostic without a line" in result.stdout
+
+
 # ---------------------------------------------------------------------------
 # pyxle routes
 # ---------------------------------------------------------------------------

@@ -1,35 +1,38 @@
-"""Parser that splits `.pyx` files into Python and JSX segments."""
+"""AST-driven parser that splits ``.pyx`` files into Python and JSX segments.
+
+The parser is purely AST-driven: no fence markers, no string-based
+directives, no per-line heuristics. The Python/JSX boundary is found
+by walking the source greedily with :func:`ast.parse` — at each cursor
+position the parser tries to grow the largest valid Python prefix; if
+none is possible, it grows a JSX segment until Python resumes. This
+cleanly handles arbitrary alternation of Python and JSX blocks
+(``python | jsx | python | jsx | ...``) in any order, including
+JSX-first files, single-section files, empty files.
+
+The parser exposes a structured syntax error reporting mechanism:
+``PyxDiagnostic`` entries on ``PyxParseResult.diagnostics``, populated
+in tolerant mode so IDEs and ``pyxle check`` can surface every error
+per file at once instead of stopping at the first.
+"""
 
 from __future__ import annotations
 
 import ast
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Literal, Sequence
 
 from .exceptions import CompilationError
 
-_PYTHON_PREFIXES = (
-    "import ",
-    "from ",
-    "def ",
-    "async def ",
-    "class ",
-    "@",
-    "if ",
-    "with ",
-    "for ",
-    "while ",
-    "try:",
-    "except",
-    "finally:",
-)
-
-_STRING_PREFIX_CHARS = frozenset("rRuUfFbB")
+# ---------------------------------------------------------------------------
+# Public dataclasses
+# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class LoaderDetails:
+    """Metadata about an ``@server``-decorated loader function."""
+
     name: str
     line_number: int
     is_async: bool
@@ -38,7 +41,7 @@ class LoaderDetails:
 
 @dataclass(frozen=True)
 class ActionDetails:
-    """Metadata for a single ``@action``-decorated function in a ``.pyx`` file."""
+    """Metadata about an ``@action``-decorated function."""
 
     name: str
     line_number: int
@@ -47,7 +50,40 @@ class ActionDetails:
 
 
 @dataclass(frozen=True)
+class PyxDiagnostic:
+    """A syntax or structural error found during parsing.
+
+    Diagnostics are populated when ``tolerant=True``. In strict mode the
+    parser raises :class:`CompilationError` on the first error and never
+    populates ``PyxParseResult.diagnostics``.
+
+    Attributes
+    ----------
+    section:
+        Which part of the file the error originated in: ``"python"`` for
+        Python AST/semantic errors, ``"jsx"`` for JSX/Babel errors.
+    severity:
+        Either ``"error"`` or ``"warning"``.
+    message:
+        Human-readable error message.
+    line:
+        1-indexed line number in the original ``.pyx`` source, or
+        ``None`` if the position is unknown.
+    column:
+        1-indexed column number, or ``None``.
+    """
+
+    section: Literal["python", "jsx"]
+    severity: Literal["error", "warning"]
+    message: str
+    line: int | None
+    column: int | None = None
+
+
+@dataclass(frozen=True)
 class PyxParseResult:
+    """The product of parsing a ``.pyx`` file."""
+
     python_code: str
     jsx_code: str
     loader: LoaderDetails | None
@@ -59,81 +95,1011 @@ class PyxParseResult:
     image_declarations: tuple[dict, ...] = ()
     head_jsx_blocks: tuple[str, ...] = ()
     actions: tuple[ActionDetails, ...] = ()
+    diagnostics: tuple[PyxDiagnostic, ...] = ()
+
+
+# ---------------------------------------------------------------------------
+# Module constants
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
-class _LineNode:
-    number: int
-    text: str
+class _Segment:
+    """A contiguous span of source classified as Python or JSX.
 
+    ``start`` is the 0-indexed line where the segment begins. ``end`` is
+    exclusive.
+    """
 
-@dataclass(slots=True)
-class _SegmentNode:
     kind: Literal["python", "jsx"]
-    lines: list[_LineNode]
-
-    def append(self, *, number: int, text: str) -> None:
-        self.lines.append(_LineNode(number=number, text=text))
+    start: int
+    end: int
 
 
 @dataclass(slots=True)
-class _StringTracker:
-    delimiter: str
-    triple: bool
+class _DiagnosticCollector:
+    """Routes errors to either ``CompilationError`` or a diagnostic list."""
+
+    tolerant: bool
+    diagnostics: list[PyxDiagnostic] = field(default_factory=list)
+
+    def emit(
+        self,
+        message: str,
+        line: int | None,
+        *,
+        section: Literal["python", "jsx"] = "python",
+        column: int | None = None,
+    ) -> None:
+        if self.tolerant:
+            self.diagnostics.append(
+                PyxDiagnostic(
+                    section=section,
+                    severity="error",
+                    message=message,
+                    line=line,
+                    column=column,
+                )
+            )
+            return
+        raise CompilationError(message, line)
+
+
+def _normalize_newlines(text: str) -> list[str]:
+    """Normalize newlines and strip a leading UTF-8 BOM if present.
+
+    CRLF and bare CR are normalised to LF, then a leading ``U+FEFF`` is
+    removed (Python's :func:`ast.parse` rejects in-string BOMs even
+    though most file encodings strip them transparently). Returns the
+    text split on LF without a trailing empty line.
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return normalized.split("\n")
+
+
+def _join_lines(lines: Iterable[str]) -> str:
+    """Join lines back with newlines, adding a trailing newline if non-empty."""
+    materialized = list(lines)
+    if not materialized:
+        return ""
+    return "\n".join(materialized) + "\n"
+
+
+def _segment_has_content(lines: Sequence[str], segment: _Segment) -> bool:
+    return any(lines[i].strip() for i in range(segment.start, segment.end))
+
+
+def _find_largest_python_at(lines: Sequence[str], start: int, n: int) -> int:
+    """Return the largest k such that ``lines[start:k]`` is valid Python.
+
+    Returns ``start`` when no Python statement begins at ``start``. Returns
+    ``n`` when the entire remainder of the file is valid Python.
+
+    The algorithm tries to parse the entire suffix first; on
+    :class:`SyntaxError`, it walks back from ``exc.lineno`` line by line
+    until a valid prefix is found. Typically terminates in 1-2 attempts
+    because the SyntaxError lineno usually points exactly at the JSX
+    boundary.
+
+    May propagate :class:`MemoryError` or :class:`RecursionError` if
+    CPython's parser stack overflows on a deeply-nested expression.
+    The outer :meth:`PyxParser.parse_text` catches both and converts
+    them into a structured diagnostic.
+    """
+    if start >= n:
+        return start
+
+    rest = "\n".join(lines[start:n])
+    if not rest.strip():
+        return n
+
+    try:
+        ast.parse(rest)
+        return n
+    except SyntaxError as exc:
+        first_failure = (exc.lineno or 1) - 1
+
+    # Walk back from the first failing line to find the largest valid
+    # prefix. ``upper`` always reaches ``0`` eventually, where the empty
+    # prefix triggers the ``not prefix.strip()`` branch.
+    upper = min(first_failure + 1, n - start)
+    while True:
+        prefix = "\n".join(lines[start : start + upper])
+        if not prefix.strip():
+            return start
+        try:
+            ast.parse(prefix)
+            return start + upper
+        except SyntaxError:
+            upper -= 1
+
+
+def _find_jsx_end_at(lines: Sequence[str], start: int, n: int) -> int:
+    """Return the smallest k > ``start`` where ``lines[k:]`` resumes Python.
+
+    Walks forward from ``start + 1`` while tracking JS structural state
+    (string literals, block comments, AND brace/paren/bracket depth).
+    The walker first consumes ``lines[start]`` to seed the state, then
+    at each subsequent non-blank line checks whether the state is at a
+    clean top-level JS position — no open string/comment AND all
+    brace/paren/bracket depths zero — and only then attempts to find a
+    Python segment starting there. The first such line at which a
+    non-empty Python segment can begin is the end of the JSX block.
+
+    Tracking brace/paren/bracket depth is essential to fix the bug
+    where content inside an open JSX function body that happens to look
+    like Python (e.g. ``@action`` decorators embedded in a JSX
+    component body, or ``import os`` shapes inside template literals)
+    would otherwise be incorrectly extracted as a Python segment,
+    splitting the JSX function in half.
+
+    Returns ``n`` when no Python resumes — the rest of the file is JSX.
+    """
+    state = _JsState()
+    # Seed the state with the starting JSX line so subsequent
+    # iterations see its open braces / strings.
+    state.advance(lines[start])
+    for k in range(start + 1, n):
+        if not lines[k].strip():
+            # Blank lines don't change state and don't trigger a section
+            # switch; advance to the next iteration.
+            continue
+        # The next line must be at a clean top-level JS position — no
+        # open string/comment AND all brace/paren/bracket depths zero.
+        if state.is_clean() and _find_largest_python_at(lines, k, n) > k:
+            return k
+        state.advance(lines[k])
+    return n
 
 
 @dataclass(slots=True)
-class _DocumentNode:
-    segments: list[_SegmentNode]
-    fenced: bool = False
+class _JsState:
+    """Mutable JS-aware state for the segmentation walker.
+
+    Tracks string state (single/double-quoted strings reset at EOL,
+    backtick template literals span lines), ``/* */`` block comments,
+    AND brace/paren/bracket nesting depth. The walker uses
+    :meth:`is_clean` to ask "are we at a top-level position where Python
+    could plausibly resume?" — the answer is no while inside any open
+    string, comment, or nesting.
+    """
+
+    string: str | None = None  # ', ", `, or None
+    block_comment: bool = False
+    brace_depth: int = 0
+    paren_depth: int = 0
+    bracket_depth: int = 0
+
+    def is_clean(self) -> bool:
+        return (
+            self.string is None
+            and not self.block_comment
+            and self.brace_depth == 0
+            and self.paren_depth == 0
+            and self.bracket_depth == 0
+        )
+
+    def advance(self, line: str) -> None:
+        """Update state by walking *line* character by character."""
+        length = len(line)
+        j = 0
+        while j < length:
+            ch = line[j]
+            if self.string is not None:
+                if self.string == "`":
+                    if ch == "\\" and j + 1 < length:
+                        j += 2
+                        continue
+                    if ch == "`":
+                        self.string = None
+                    j += 1
+                    continue
+                if ch == "\\" and j + 1 < length:
+                    j += 2
+                    continue
+                if ch == self.string:
+                    self.string = None
+                j += 1
+                continue
+            if self.block_comment:
+                if ch == "*" and j + 1 < length and line[j + 1] == "/":
+                    self.block_comment = False
+                    j += 2
+                    continue
+                j += 1
+                continue
+            # Free state.
+            if ch in ("'", '"', "`"):
+                self.string = ch
+                j += 1
+                continue
+            if ch == "/" and j + 1 < length:
+                next_ch = line[j + 1]
+                if next_ch == "/":
+                    break  # Line comment to EOL.
+                if next_ch == "*":
+                    self.block_comment = True
+                    j += 2
+                    continue
+            if ch == "{":
+                self.brace_depth += 1
+            elif ch == "}":
+                self.brace_depth = max(0, self.brace_depth - 1)
+            elif ch == "(":
+                self.paren_depth += 1
+            elif ch == ")":
+                self.paren_depth = max(0, self.paren_depth - 1)
+            elif ch == "[":
+                self.bracket_depth += 1
+            elif ch == "]":
+                self.bracket_depth = max(0, self.bracket_depth - 1)
+            j += 1
+        # Single/double-quoted JS strings reset at EOL.
+        if self.string in ("'", '"'):
+            self.string = None
+
+
+def _jsx_state_clean_between(
+    lines: Sequence[str], start: int, end: int
+) -> bool:
+    """Check if JS content in ``lines[start:end]`` ends at a clean state.
+
+    Convenience wrapper around :class:`_JsState` for tests and external
+    callers. Returns ``True`` when, after walking ``lines[start:end]``,
+    no string/comment is open and all brace/paren/bracket depths are
+    back to zero.
+    """
+    state = _JsState()
+    for i in range(start, end):
+        state.advance(lines[i])
+    return state.is_clean()
+
+
+def _auto_detect_segments(lines: Sequence[str]) -> list[_Segment]:
+    """Walk *lines*, alternating Python and JSX segments based on AST validity.
+
+    The walker uses a greedy strategy: at each cursor position, it tries
+    to grow the largest possible Python segment (via ``ast.parse``); if
+    none is possible, it grows a JSX segment until Python resumes. This
+    cleanly handles arbitrary alternation: ``python | jsx | python | jsx``,
+    JSX-first files, pure-Python files, pure-JSX files, and empty files.
+
+    Auto-detected segments are inherently consistent — Python segments
+    parse cleanly and JSX segments don't — so they don't need explicit
+    validation in Layer 3.
+    """
+    segments: list[_Segment] = []
+    n = len(lines)
+    if n == 0:
+        return segments
+
+    cursor = 0
+    while cursor < n:
+        # Skip leading blank lines (assigned to the next segment).
+        if not lines[cursor].strip():
+            cursor += 1
+            continue
+
+        py_end = _find_largest_python_at(lines, cursor, n)
+        if py_end > cursor:
+            segments.append(_Segment(kind="python", start=cursor, end=py_end))
+            cursor = py_end
+            continue
+
+        jsx_end = _find_jsx_end_at(lines, cursor, n)
+        segments.append(_Segment(kind="jsx", start=cursor, end=jsx_end))
+        cursor = jsx_end
+
+    # Trim segments down to the lines that actually contain non-blank
+    # content. Trailing blank lines are absorbed into the next segment by
+    # the cursor advance, but they shouldn't sit at the END of an output.
+    return [seg for seg in segments if _segment_has_content(lines, seg)]
+
+
+_PYTHON_ONLY_FIRST_TOKENS = frozenset(
+    {
+        "def",
+        "class",
+        "from",
+        "with",
+        "elif",
+        "except",
+        "finally",
+        "raise",
+        "yield",
+        "pass",
+        "global",
+        "nonlocal",
+        "assert",
+        "del",
+        "lambda",
+    }
+)
+
+
+# Prefixes that a JSX/JS top-level statement may legitimately start with.
+# Any segment whose first non-blank line doesn't begin with one of these
+# (after accounting for ``async function``) is suspicious — it may be
+# broken Python that the auto-detect walker silently absorbed into a
+# JSX bucket because ``ast.parse`` failed before the walker could claim
+# it as Python.
+_JSX_TOPLEVEL_PREFIXES: tuple[str, ...] = (
+    "import ",
+    "import{",
+    "import(",
+    "import*",
+    'import"',
+    "import'",
+    "export ",
+    "export{",
+    "export*",
+    "export(",
+    "const ",
+    "let ",
+    "var ",
+    "function ",
+    "function(",
+    "function*",
+    "class ",
+    "class{",
+    "//",
+    "/*",
+    "<",
+    "{",
+    "}",
+    "(",
+    ")",
+    "[",
+    "]",
+    ";",
+)
+
+
+def _contains_jsx_element_marker(line: str) -> bool:
+    """Return True if *line* contains a JSX element tag marker.
+
+    A JSX element begins with ``<`` immediately followed by a letter
+    (opening tag like ``<Provider``), ``/`` (closing tag like
+    ``</div``), or ``>`` (fragment ``<>``). The ``<`` must not be
+    followed by whitespace — that would be a less-than operator, not
+    a tag. This is a cheap but surprisingly robust way to distinguish
+    a JSX-carrying line from broken Python.
+    """
+    i = line.find("<")
+    while i != -1 and i + 1 < len(line):
+        next_ch = line[i + 1]
+        if next_ch.isalpha() or next_ch in ("/", ">"):
+            return True
+        i = line.find("<", i + 1)
+    return False
+
+
+def _looks_like_jsx_toplevel(line: str) -> bool:
+    """Return True if *line* plausibly starts a JSX/JS top-level statement.
+
+    Checks the first non-blank character(s) of *line* against the known
+    set of JSX top-level statement starters, and falls back to checking
+    for an embedded JSX element tag marker (``<TagName`` style) so
+    that bare assignments like ``config = <Provider />`` are still
+    recognized as JSX. Handles the ``async function`` special case
+    where the starter spans two tokens. Called only on non-blank
+    lines (the detector iterates via :func:`_segment_has_content`).
+    """
+    stripped = line.lstrip()
+    for prefix in _JSX_TOPLEVEL_PREFIXES:
+        if stripped.startswith(prefix):
+            return True
+    # ``async function`` is the only JS top-level starter that spans
+    # two tokens. Python's ``async def`` is handled via the
+    # Python-keyword heuristic instead.
+    if stripped.startswith("async ") and stripped[6:].lstrip().startswith(
+        "function"
+    ):
+        return True
+    # A bare-identifier assignment to a JSX expression
+    # (``config = <Provider />``) is legitimate JSX. Accept any line
+    # that contains a JSX element tag marker.
+    return _contains_jsx_element_marker(stripped)
+
+
+def _detect_broken_python_in_jsx_segments(
+    segments: Sequence[_Segment],
+    lines: Sequence[str],
+    *,
+    collector: _DiagnosticCollector,
+) -> None:
+    """Flag JSX segments that look like broken Python and raise/diagnose.
+
+    JSX top-level statements always start at column 0 with one of a
+    small set of tokens (``import``, ``export``, ``const``, ``let``,
+    ``var``, ``function``, ``async function``, ``class``, ``//``,
+    ``/*``, ``<Component``, ``{``, etc). When an auto-detected JSX
+    segment begins with content that doesn't match any of those
+    starters, it almost certainly came from a Python block whose
+    ``ast.parse`` failed and the walker silently absorbed the bad
+    lines into a JSX bucket.
+
+    The signal fires in three overlapping cases:
+      1. The first non-blank line is indented (JSX top-level never is).
+      2. The first non-blank line starts with a Python-only keyword
+         (``def``, ``class``, ``from``, decorators, etc.).
+      3. The first non-blank line doesn't match any known JSX
+         top-level starter (catches bare assignments like
+         ``x = "unterminated``, which look like neither Python
+         keywords nor JSX keywords but are syntactically Python).
+
+    When any signal fires, we re-run ``ast.parse`` on the segment in
+    isolation to recover the precise Python error message and report
+    it as a structured Python diagnostic instead of letting broken
+    Python silently flow to the JSX compiler downstream.
+    """
+    # ``_segment_has_content`` filtering upstream guarantees every
+    # segment has at least one non-blank line, so the empty-segment
+    # defensive branch that earlier revisions had is unreachable.
+    for segment in segments:
+        if segment.kind != "jsx":
+            continue
+
+        # Find the first non-blank line of the segment. _segment_has_content
+        # filtering upstream guarantees there is at least one.
+        first_line_idx = next(
+            idx
+            for idx in range(segment.start, segment.end)
+            if lines[idx].strip()
+        )
+
+        first_line = lines[first_line_idx]
+        is_indented = first_line[0] in (" ", "\t")
+        first_token = first_line.lstrip().split(None, 1)[0]
+        looks_python_keyword = (
+            first_token.startswith("@")
+            or first_token in _PYTHON_ONLY_FIRST_TOKENS
+            # 'async' followed by 'def' is Python; 'async function' is JS.
+            or (
+                first_token == "async"
+                and "def " in first_line
+                and "function " not in first_line
+            )
+        )
+        is_unknown_jsx_starter = not _looks_like_jsx_toplevel(first_line)
+
+        if not (is_indented or looks_python_keyword or is_unknown_jsx_starter):
+            continue
+
+        # Try to ast.parse the segment in isolation to recover the precise
+        # Python error message. If the segment unexpectedly parses cleanly
+        # we just don't report — control flows to the next iteration.
+        segment_text = "\n".join(lines[segment.start : segment.end])
+        try:
+            ast.parse(segment_text)
+        except SyntaxError as exc:
+            relative_line = exc.lineno or 1
+            absolute_line = segment.start + relative_line
+            collector.emit(
+                exc.msg or "invalid syntax",
+                absolute_line,
+                section="python",
+            )
+
+
+def _concat_segments(
+    segments: Sequence[_Segment], lines: Sequence[str]
+) -> tuple[str, list[int], str, list[int]]:
+    """Concatenate segments by kind, returning code blobs and line maps.
+
+    Each Python segment's lines are appended to the python output, with
+    their original 1-indexed line numbers tracked in ``python_line_numbers``.
+    Same for JSX. The line maps let downstream code (notably the loader/
+    action validators) translate line numbers in the joined output back
+    to the original ``.pyx`` source.
+    """
+    python_lines: list[str] = []
+    python_line_numbers: list[int] = []
+    jsx_lines: list[str] = []
+    jsx_line_numbers: list[int] = []
+
+    for segment in segments:
+        for i in range(segment.start, segment.end):
+            line = lines[i]
+            line_no = i + 1  # 1-indexed
+            if segment.kind == "python":
+                python_lines.append(line)
+                python_line_numbers.append(line_no)
+            else:
+                jsx_lines.append(line)
+                jsx_line_numbers.append(line_no)
+
+    return (
+        _join_lines(python_lines),
+        python_line_numbers,
+        _join_lines(jsx_lines),
+        jsx_line_numbers,
+    )
+
+
+def _map_lineno(lineno: int | None, line_numbers: Sequence[int]) -> int | None:
+    """Translate a line number in joined output back to the original source."""
+    if lineno is None or lineno < 1:
+        return lineno
+    if not line_numbers:
+        return lineno
+    index = min(lineno - 1, len(line_numbers) - 1)
+    return line_numbers[index]
+
+
+# ---------------------------------------------------------------------------
+# AST metadata extraction (loader, actions, head)
+# ---------------------------------------------------------------------------
+
+
+def _has_decorator_named(decorators: Sequence[ast.expr], name: str) -> bool:
+    for deco in decorators:
+        target = deco
+        if isinstance(deco, ast.Call):
+            target = deco.func
+        if isinstance(target, ast.Name) and target.id == name:
+            return True
+        if isinstance(target, ast.Attribute) and target.attr == name:
+            return True
+    return False
+
+
+def _has_server_decorator(decorators: Sequence[ast.expr]) -> bool:
+    return _has_decorator_named(decorators, "server")
+
+
+def _has_action_decorator(decorators: Sequence[ast.expr]) -> bool:
+    return _has_decorator_named(decorators, "action")
+
+
+def _detect_loader(
+    tree: ast.Module | None,
+    python_line_numbers: Sequence[int],
+    *,
+    collector: _DiagnosticCollector,
+) -> LoaderDetails | None:
+    if tree is None:
+        return None
+
+    loader_node: ast.AsyncFunctionDef | None = None
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and _has_server_decorator(
+            node.decorator_list
+        ):
+            line = _map_lineno(node.lineno, python_line_numbers)
+            collector.emit("@server loader must be declared as async", line)
+            return None
+
+        if isinstance(node, ast.ClassDef) and _has_server_decorator(
+            node.decorator_list
+        ):
+            line = _map_lineno(node.lineno, python_line_numbers)
+            collector.emit(
+                "@server decorator can only be applied to functions", line
+            )
+            return None
+
+        if isinstance(node, ast.AsyncFunctionDef) and _has_server_decorator(
+            node.decorator_list
+        ):
+            if loader_node is not None:
+                line = _map_lineno(node.lineno, python_line_numbers)
+                collector.emit("Multiple @server loaders detected", line)
+                return None
+            loader_node = node
+
+    if loader_node is None:
+        return None
+
+    if loader_node.col_offset != 0:
+        line = _map_lineno(loader_node.lineno, python_line_numbers)
+        collector.emit("@server loader must be defined at module scope", line)
+        return None
+
+    # Combine positional-only and regular positional args so loaders defined
+    # like ``async def loader(request, /):`` are accepted.
+    all_pos_args = list(loader_node.args.posonlyargs) + list(loader_node.args.args)
+
+    if not all_pos_args:
+        line = _map_lineno(loader_node.lineno, python_line_numbers)
+        collector.emit("@server loader must accept a `request` argument", line)
+        return None
+
+    first_arg = all_pos_args[0].arg
+    if first_arg != "request":
+        line = _map_lineno(loader_node.lineno, python_line_numbers)
+        collector.emit(
+            "First argument of @server loader must be named 'request'", line
+        )
+        return None
+
+    parameters = tuple(arg.arg for arg in all_pos_args)
+    line = _map_lineno(loader_node.lineno, python_line_numbers)
+    return LoaderDetails(
+        name=loader_node.name,
+        line_number=line,
+        is_async=True,
+        parameters=parameters,
+    )
+
+
+def _detect_actions(
+    tree: ast.Module | None,
+    python_line_numbers: Sequence[int],
+    *,
+    collector: _DiagnosticCollector,
+) -> tuple[ActionDetails, ...]:
+    """Return metadata for every ``@action``-decorated function in *tree*.
+
+    Errors during validation (sync function, wrong arg name, duplicate name,
+    etc.) are routed through *collector*.
+    """
+    if tree is None:
+        return ()
+
+    seen_names: set[str] = set()
+    actions: list[ActionDetails] = []
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and _has_action_decorator(
+            node.decorator_list
+        ):
+            line = _map_lineno(node.lineno, python_line_numbers)
+            collector.emit("@action must be declared as async", line)
+            continue
+
+        if isinstance(node, ast.ClassDef) and _has_action_decorator(
+            node.decorator_list
+        ):
+            line = _map_lineno(node.lineno, python_line_numbers)
+            collector.emit(
+                "@action decorator can only be applied to functions", line
+            )
+            continue
+
+        if not isinstance(node, ast.AsyncFunctionDef):
+            continue
+        if not _has_action_decorator(node.decorator_list):
+            continue
+
+        line = _map_lineno(node.lineno, python_line_numbers)
+
+        if _has_server_decorator(node.decorator_list):
+            collector.emit(
+                "@action and @server cannot both be applied to the same "
+                "function",
+                line,
+            )
+            continue
+
+        if node.col_offset != 0:
+            collector.emit(
+                "@action function must be defined at module scope", line
+            )
+            continue
+
+        all_pos_args = list(node.args.posonlyargs) + list(node.args.args)
+
+        if not all_pos_args:
+            collector.emit(
+                "@action function must accept a `request` argument", line
+            )
+            continue
+
+        first_arg = all_pos_args[0].arg
+        if first_arg != "request":
+            collector.emit(
+                "First argument of @action function must be named 'request'",
+                line,
+            )
+            continue
+
+        if node.name in seen_names:
+            collector.emit(
+                f"Duplicate @action name '{node.name}' — action names must be "
+                "unique per page",
+                line,
+            )
+            continue
+
+        seen_names.add(node.name)
+        parameters = tuple(arg.arg for arg in all_pos_args)
+        actions.append(
+            ActionDetails(
+                name=node.name,
+                line_number=line,
+                is_async=True,
+                parameters=parameters,
+            )
+        )
+
+    return tuple(actions)
+
+
+def _extract_head_literal(
+    value: ast.AST, line: int | None, collector: _DiagnosticCollector
+) -> list[str] | None:
+    """Return literal HEAD entries, or ``None`` for dynamic assignments."""
+    if isinstance(value, ast.Constant):
+        literal = value.value
+        if literal is None:
+            return []
+        if isinstance(literal, str):
+            return [literal]
+        collector.emit(
+            "HEAD must be assigned a string or list of strings", line
+        )
+        return None
+
+    if isinstance(value, (ast.List, ast.Tuple)):
+        normalized: list[str] = []
+        for element in value.elts:
+            if not isinstance(element, ast.Constant) or not isinstance(
+                element.value, str
+            ):
+                return None
+            normalized.append(element.value)
+        return normalized
+
+    return None
+
+
+def _collect_head_elements(
+    tree: ast.Module | None,
+    python_line_numbers: Sequence[int],
+    *,
+    collector: _DiagnosticCollector,
+) -> tuple[tuple[str, ...], bool]:
+    """Extract literal ``HEAD = ...`` assignments from the Python AST."""
+    if tree is None:
+        return tuple(), False
+
+    elements: list[str] = []
+    head_is_dynamic = False
+
+    for node in tree.body:
+        if isinstance(
+            node, (ast.FunctionDef, ast.AsyncFunctionDef)
+        ) and node.name == "HEAD":
+            elements = []
+            head_is_dynamic = True
+            continue
+
+        if not isinstance(node, ast.Assign):
+            continue
+
+        if not any(
+            isinstance(target, ast.Name) and target.id == "HEAD"
+            for target in node.targets
+        ):
+            continue
+
+        line = _map_lineno(node.lineno, python_line_numbers)
+        literal = _extract_head_literal(node.value, line, collector)
+        if literal is None:
+            elements = []
+            head_is_dynamic = True
+            continue
+
+        elements = literal
+        head_is_dynamic = False
+
+    return tuple(elements), head_is_dynamic
+
+
+# ---------------------------------------------------------------------------
+# JSX metadata extraction (Babel-backed)
+# ---------------------------------------------------------------------------
+
+
+def _detect_script_declarations(jsx_code: str) -> tuple[dict, ...]:
+    from .jsx_parser import parse_jsx_components
+
+    result = parse_jsx_components(jsx_code, target_components={"Script"})
+    if result.error:
+        return ()
+    return tuple(
+        component.props
+        for component in result.components
+        if component.name == "Script" and component.props
+    )
+
+
+def _detect_image_declarations(jsx_code: str) -> tuple[dict, ...]:
+    from .jsx_parser import parse_jsx_components
+
+    result = parse_jsx_components(jsx_code, target_components={"Image"})
+    if result.error:
+        return ()
+    return tuple(
+        component.props
+        for component in result.components
+        if component.name == "Image" and component.props
+    )
+
+
+def _detect_head_jsx_blocks(jsx_code: str) -> tuple[str, ...]:
+    from .jsx_parser import parse_jsx_components
+
+    result = parse_jsx_components(jsx_code, target_components={"Head"})
+    if result.error:
+        return ()
+    return tuple(
+        component.children.strip()
+        for component in result.components
+        if component.name == "Head"
+        and component.children
+        and component.children.strip()
+    )
+
+
+def _validate_jsx_syntax(
+    jsx_code: str,
+    jsx_line_numbers: Sequence[int],
+    *,
+    collector: _DiagnosticCollector,
+) -> None:
+    """Run Babel on the full JSX section. On failure, emit a diagnostic.
+
+    Opt-in via ``validate_jsx=True``. Babel is a Node.js subprocess
+    (~200ms per call) and is skipped on the fast build path. When the
+    Babel script itself isn't available (no Node.js, missing langkit),
+    the call returns an error message that we treat as ``"unknown"`` —
+    we don't fail loud in that case because the diagnostic was opt-in.
+    """
+    from .jsx_parser import parse_jsx_components
+
+    result = parse_jsx_components(jsx_code, target_components=set())
+    if not result.error:
+        return
+
+    line = jsx_line_numbers[0] if jsx_line_numbers else None
+    collector.emit(
+        f"JSX syntax error: {result.error}", line, section="jsx"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public parser
+# ---------------------------------------------------------------------------
 
 
 class PyxParser:
-    """Split a `.pyx` source file into Python and JSX sections."""
+    """Parses ``.pyx`` files into Python and JSX segments plus metadata."""
 
-    def parse(self, source_path: Path, *, tolerant: bool = False) -> PyxParseResult:
-        text = source_path.read_text(encoding="utf-8")
-        lines = self._normalize_newlines(text)
-        return self._parse_from_lines(lines, tolerant=tolerant)
+    def parse(
+        self,
+        source_path: Path,
+        *,
+        tolerant: bool = False,
+        validate_jsx: bool = False,
+    ) -> PyxParseResult:
+        """Parse a ``.pyx`` file from disk into a :class:`PyxParseResult`.
 
-    def parse_text(self, text: str, *, tolerant: bool = False) -> PyxParseResult:
-        """Parse raw `.pyx` content without reading from disk."""
+        Parameters
+        ----------
+        source_path:
+            Path to the ``.pyx`` file. Read with ``utf-8-sig`` so a
+            leading byte-order mark is consumed transparently.
+        tolerant:
+            When True, syntax and semantic errors are collected as
+            :class:`PyxDiagnostic` entries on the result instead of
+            raising :class:`CompilationError`. Used by IDE/LSP
+            integrations that need partial results from incomplete code.
+        validate_jsx:
+            When True, the JSX section is also passed through Babel via
+            the existing ``parse_jsx_components`` helper. Babel parse
+            failures contribute ``PyxDiagnostic(section="jsx", ...)``
+            entries (or raise :class:`CompilationError` in strict mode).
+            Off by default because Babel is a Node.js subprocess
+            (~200ms per call).
+        """
+        text = source_path.read_text(encoding="utf-8-sig")
+        return self.parse_text(text, tolerant=tolerant, validate_jsx=validate_jsx)
 
-        lines = self._normalize_newlines(text)
-        return self._parse_from_lines(lines, tolerant=tolerant)
+    def parse_text(
+        self,
+        text: str,
+        *,
+        tolerant: bool = False,
+        validate_jsx: bool = False,
+    ) -> PyxParseResult:
+        """Parse a ``.pyx`` source string into a :class:`PyxParseResult`."""
+        lines = _normalize_newlines(text)
+        collector = _DiagnosticCollector(tolerant=tolerant)
 
-    def _parse_from_lines(self, lines: Sequence[str], *, tolerant: bool = False) -> PyxParseResult:
-        document = self._build_document(lines)
-        if not document.fenced:
-            self._try_repair_document(document)
+        # Segment the file purely via AST-driven auto-detection. Deeply
+        # nested expressions can exhaust CPython's parser stack and
+        # raise MemoryError/RecursionError from inside ``ast.parse``.
+        # We catch these at the outer boundary, emit a structured
+        # diagnostic, and return an empty-but-valid PyxParseResult so
+        # the CLI can keep scanning the rest of the project.
+        try:
+            segments = _auto_detect_segments(lines)
+        except (MemoryError, RecursionError) as exc:
+            collector.emit(
+                f"Python parser exhausted ({type(exc).__name__}): "
+                f"source is too deeply nested or too large for "
+                f"CPython to parse",
+                line=1,
+                section="python",
+            )
+            return PyxParseResult(
+                python_code="",
+                jsx_code="",
+                loader=None,
+                python_line_numbers=(),
+                jsx_line_numbers=(),
+                head_elements=(),
+                head_is_dynamic=False,
+                script_declarations=(),
+                image_declarations=(),
+                head_jsx_blocks=(),
+                actions=(),
+                diagnostics=tuple(collector.diagnostics),
+            )
 
-        python_lines: list[str] = []
-        python_line_numbers: list[int] = []
-        jsx_lines: list[str] = []
-        jsx_line_numbers: list[int] = []
-
-        for segment in document.segments:
-            if segment.kind == "python":
-                for entry in segment.lines:
-                    python_lines.append(entry.text)
-                    python_line_numbers.append(entry.number)
-            else:
-                for entry in segment.lines:
-                    jsx_lines.append(entry.text)
-                    jsx_line_numbers.append(entry.number)
-
-        python_code = self._join_lines(python_lines)
-        jsx_code = self._join_lines(jsx_lines)
-        tree = self._parse_python_ast(python_code, python_line_numbers, tolerant=tolerant)
-        loader = self._detect_loader(tree, python_line_numbers)
-        actions = self._detect_actions(tree, python_line_numbers, loader)
-        head_elements, head_is_dynamic = self._collect_head_elements(
-            tree,
-            python_line_numbers,
+        # Catch the case where broken Python was silently absorbed into
+        # a JSX segment. The signal is a JSX segment whose first
+        # non-blank line is indented or starts with a Python-only
+        # keyword — JSX top-level statements never have either shape.
+        _detect_broken_python_in_jsx_segments(
+            segments, lines, collector=collector
         )
-        script_declarations = self._detect_script_declarations(jsx_code)
-        image_declarations = self._detect_image_declarations(jsx_code)
-        head_jsx_blocks = self._detect_head_jsx_blocks(jsx_code)
+
+        # Concatenate segments by kind and extract metadata.
+        (
+            python_code,
+            python_line_numbers,
+            jsx_code,
+            jsx_line_numbers,
+        ) = _concat_segments(segments, lines)
+
+        tree = self._parse_python_safely(python_code)
+
+        loader = _detect_loader(
+            tree, python_line_numbers, collector=collector
+        )
+        actions = _detect_actions(
+            tree, python_line_numbers, collector=collector
+        )
+        head_elements, head_is_dynamic = _collect_head_elements(
+            tree, python_line_numbers, collector=collector
+        )
+
+        # Layer 5: JSX metadata + optional Babel validation.
+        script_declarations = _detect_script_declarations(jsx_code)
+        image_declarations = _detect_image_declarations(jsx_code)
+        head_jsx_blocks = _detect_head_jsx_blocks(jsx_code)
+
+        # Only run JSX validation when the Python section is clean.
+        # If Python already has diagnostics, the broken Python content
+        # has almost certainly been absorbed into ``jsx_code`` by the
+        # walker — rerunning Babel on it produces a cascade of noisy
+        # ``[jsx]`` errors that are really just symptoms of the
+        # underlying ``[python]`` problem. Fix Python first; JSX
+        # validation becomes meaningful again on the next run.
+        has_python_errors = any(
+            d.section == "python" for d in collector.diagnostics
+        )
+        if validate_jsx and jsx_code.strip() and not has_python_errors:
+            _validate_jsx_syntax(
+                jsx_code, jsx_line_numbers, collector=collector
+            )
+
+        diagnostics = tuple(
+            sorted(
+                collector.diagnostics,
+                key=lambda d: (d.line or 0, d.column or 0),
+            )
+        )
 
         return PyxParseResult(
             python_code=python_code,
@@ -147,795 +1113,22 @@ class PyxParser:
             image_declarations=image_declarations,
             head_jsx_blocks=head_jsx_blocks,
             actions=actions,
+            diagnostics=diagnostics,
         )
 
-    def _build_document(self, lines: Sequence[str]) -> _DocumentNode:
-        document = _DocumentNode(segments=[], fenced=False)
-        current_segment: _SegmentNode | None = None
-        python_state = _PythonState(parser=self)
-        python_started = False
-        mode: str = "auto"
-        fenced: bool = False
-
-        for idx, line in enumerate(lines, start=1):
-            stripped = line.strip()
-
-            toggle = self._detect_mode_toggle(stripped)
-            if toggle:
-                mode = toggle
-                fenced = True
-                document.fenced = True
-                if toggle == "python":
-                    python_started = True
-                python_state.reset_for_new_segment()
-                current_segment = None
-                continue
-
-            indent = self._leading_spaces(line)
-            classification, mode = self._classify_line(
-                stripped=stripped,
-                indent=indent,
-                python_started=python_started,
-                mode=mode,
-                python_state=python_state,
-                fenced=fenced,
-            )
-
-            if classification is None:
-                continue
-
-            if classification == "python":
-                python_started = True
-
-            if current_segment is None or current_segment.kind != classification:
-                if classification == "python":
-                    python_state.reset_for_new_segment()
-                current_segment = _SegmentNode(kind=classification, lines=[])
-                document.segments.append(current_segment)
-
-            current_segment.append(number=idx, text=line)
-
-            if classification == "python":
-                python_state.advance(
-                    line=line,
-                    stripped=stripped,
-                    indent=indent,
-                    line_number=idx,
-                )
-
-        return document
-
-    def _classify_line(
-        self,
-        *,
-        stripped: str,
-        indent: int,
-        python_started: bool,
-        mode: str,
-        python_state: _PythonState,
-        fenced: bool = False,
-    ) -> tuple[str | None, str]:
-        if mode == "python":
-            if not fenced and self._should_switch_to_js(stripped, indent, python_state):
-                return "jsx", "jsx"
-            return "python", "python"
-
-        if mode == "jsx":
-            if not fenced and self._should_switch_to_python(stripped, indent):
-                return "python", "python"
-            return "jsx", "jsx"
-
-        # mode == auto
-        if not stripped and not python_started:
-            return None, "auto"
-
-        if self._is_probable_python(stripped, indent, python_started):
-            return "python", "python"
-
-        return "jsx", "jsx"
-
-    def _should_switch_to_js(
-        self,
-        stripped: str,
-        indent: int,
-        python_state: _PythonState,
-    ) -> bool:
-        if not stripped:
-            return False
-        if not python_state.can_switch_segments(indent):
-            return False
-        return self._is_probable_js(stripped, indent)
-
-    def _should_switch_to_python(self, stripped: str, indent: int) -> bool:
-        if not stripped:
-            return False
-        if indent > 0:
-            return False
-        if self._is_probable_js(stripped, indent):
-            return False
-        return self._is_probable_python(stripped, indent, True)
-
-    def _try_repair_document(self, document: _DocumentNode) -> None:
-        """Validate combined Python with ast.parse(); reclassify ambiguous segments on failure.
-
-        When heuristic classification produces invalid Python, segments without
-        strong Python indicators (imports, defs, decorators) are reclassified
-        as JSX.  Limited to 3 repair attempts to prevent infinite loops.
-        """
-        for _ in range(3):
-            python_lines: list[str] = []
-            segment_boundaries: list[tuple[int, int, int]] = []
-
-            for i, segment in enumerate(document.segments):
-                if segment.kind == "python":
-                    start = len(python_lines) + 1
-                    for entry in segment.lines:
-                        python_lines.append(entry.text)
-                    segment_boundaries.append((i, start, len(python_lines)))
-
-            code = self._join_lines(python_lines)
-            if not code.strip():
-                return
-
-            try:
-                ast.parse(code, mode="exec")
-                return
-            except SyntaxError as exc:
-                if exc.lineno is None:
-                    return
-
-                target_idx: int | None = None
-                for seg_idx, seg_start, seg_end in segment_boundaries:
-                    if seg_start <= exc.lineno <= seg_end:
-                        target_idx = seg_idx
-                        break
-
-                if target_idx is None:
-                    return
-
-                segment = document.segments[target_idx]
-                if self._has_strong_python_markers(segment):
-                    return
-
-                segment.kind = "jsx"
-
-    @staticmethod
-    def _has_strong_python_markers(segment: _SegmentNode) -> bool:
-        """Return True if the segment contains definitive Python syntax."""
-        for entry in segment.lines:
-            stripped = entry.text.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            if any(
-                stripped.startswith(p)
-                for p in ("import ", "from ", "def ", "async def ", "class ", "@")
-            ):
-                return True
-            if stripped.startswith(('"""', "'''")):
-                return True
-        return False
-
-    def _parse_python_ast(
+    def _parse_python_safely(
         self,
         python_code: str,
-        python_line_numbers: Sequence[int],
-        *,
-        tolerant: bool,
     ) -> ast.Module | None:
+        """Parse the Python segment with ``ast.parse``.
+
+        Returns the AST module on success, or ``None`` if the segment is
+        empty. ``_find_largest_python_at`` upstream guarantees that any
+        non-empty Python text reaching this point parses cleanly, so an
+        ``ast.parse`` failure here would indicate a bug elsewhere in
+        the parser pipeline rather than user error — we let any such
+        :class:`SyntaxError` propagate naturally so the bug surfaces.
+        """
         if not python_code.strip():
             return None
-
-        try:
-            return ast.parse(python_code, mode="exec", type_comments=True)
-        except SyntaxError as exc:  # pragma: no cover - defensive
-            if tolerant:
-                return None
-            line = self._map_lineno(exc.lineno, python_line_numbers)
-            raise CompilationError(exc.msg, line) from exc
-
-    def _update_python_indentation(
-        self,
-        indent_stack: list[int],
-        indent: int,
-        stripped: str,
-        idx: int,
-        expect_indent: bool,
-        allow_unexpected_indent: bool,
-        string_state: _StringTracker | None = None,
-    ) -> bool:
-        if not stripped:
-            return expect_indent
-
-        # Skip indentation validation when inside a multi-line string
-        if string_state is not None and string_state.triple:
-            return expect_indent
-
-        current = indent_stack[-1]
-
-        if indent > current:
-            if not (expect_indent or allow_unexpected_indent):
-                raise CompilationError("Unexpected indentation in Python block", idx)
-            indent_stack.append(indent)
-        else:
-            while indent < indent_stack[-1]:
-                indent_stack.pop()
-                if not indent_stack:
-                    indent_stack.append(0)
-                    break
-            if indent != indent_stack[-1]:
-                raise CompilationError("Inconsistent indentation in Python block", idx)
-
-        return self._line_expects_indent(stripped)
-
-    @staticmethod
-    def _line_opens_block(stripped: str) -> bool:
-        code = stripped.split("#", 1)[0].rstrip()
-        return bool(code) and code.endswith(":")
-
-    @staticmethod
-    def _line_expects_indent(stripped: str) -> bool:
-        if PyxParser._line_opens_block(stripped):
-            return True
-
-        code = stripped.split("#", 1)[0].rstrip()
-        if not code:
-            return False
-
-        return code.endswith("(") or code.endswith("[") or code.endswith("{")
-
-    @staticmethod
-    def _normalize_newlines(text: str) -> list[str]:
-        normalized = text.replace("\r\n", "\n").replace("\r", "\n")
-        return normalized.split("\n")
-
-    @staticmethod
-    def _leading_spaces(line: str) -> int:
-        i = 0
-        for char in line:
-            if char == " ":
-                i += 1
-            elif char == "\t":  # treat tabs as four spaces
-                i += 4
-            else:
-                break
-        return i
-
-    @staticmethod
-    def _detect_mode_toggle(stripped: str) -> str | None:
-        if stripped.startswith("# ---"):
-            lowered = stripped.lower()
-            # Check JSX keywords first: "javascript"/"client" are stronger
-            # signals than "server" which can appear incidentally in labels
-            # like "# --- JavaScript/PSX (Client + Server) ---".
-            if "javascript" in lowered or "client" in lowered:
-                return "jsx"
-            if "python" in lowered or "server" in lowered:
-                return "python"
-        return None
-
-    def _is_probable_python(self, stripped: str, indent: int, python_started: bool) -> bool:
-        if not stripped:
-            return python_started  # blank lines belong with python once started
-        if stripped.startswith("#"):
-            return True
-        if indent > 0:
-            return True
-        if stripped.startswith(('"""', "'''")):
-            return True
-        for prefix in _PYTHON_PREFIXES:
-            if stripped.startswith(prefix):
-                if prefix == "import " and self._looks_like_js_import(stripped):
-                    return False
-                if prefix == "if " and not stripped.endswith(":"):
-                    return False
-                if prefix in {"with ", "for ", "while ", "try:", "except", "finally:"} and not stripped.endswith(":"):
-                    return False
-                return True
-        if stripped.endswith(":") and stripped[0].isalpha():
-            return True
-        if "=" in stripped and not stripped.rstrip().endswith(";"):
-            left, _ = stripped.split("=", 1)
-            identifier = left.strip()
-            if identifier.isidentifier():
-                return True
-        return False
-
-    def _is_probable_js(self, stripped: str, indent: int) -> bool:
-        if indent > 0:
-            return False
-        if not stripped:
-            return False
-        lowered = stripped.lower()
-        if stripped.startswith("export "):
-            return True
-        if stripped.startswith(("const ", "let ", "var ", "function ", "async function ", "import type ", "type ", "interface ")):
-            return True
-        if stripped.startswith("return ") and stripped.endswith(";"):
-            return True
-        if stripped.startswith("<"):
-            return True
-        if stripped.startswith("//") or stripped.startswith("/*"):
-            return True
-        if stripped.startswith("import ") and self._looks_like_js_import(stripped):
-            return True
-        if stripped.endswith(";"):
-            return True
-        if lowered.startswith("await "):
-            return True
-        return False
-
-    @staticmethod
-    def _looks_like_js_import(line: str) -> bool:
-        if " from " in line and ("'" in line or '"' in line):
-            return True
-        if line.endswith(";"):
-            return True
-        if "{" in line or "}" in line:
-            return True
-        if line.startswith("import type "):
-            return True
-        # Side-effect imports: import 'styles.css' or import "lodash"
-        if line.startswith("import "):
-            rest = line[7:].lstrip()
-            if rest and rest[0] in ("'", '"'):
-                return True
-        return False
-
-    @staticmethod
-    def _join_lines(lines: Iterable[str]) -> str:
-        if not lines:
-            return ""
-        return "\n".join(lines) + "\n"
-
-    def _detect_loader(
-        self,
-        tree: ast.Module | None,
-        python_line_numbers: Sequence[int],
-    ) -> LoaderDetails | None:
-        if tree is None:
-            return None
-
-        loader_node: ast.AsyncFunctionDef | None = None
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and self._has_server_decorator(node.decorator_list):
-                line = self._map_lineno(node.lineno, python_line_numbers)
-                raise CompilationError("@server loader must be declared as async", line)
-
-            if isinstance(node, ast.ClassDef) and self._has_server_decorator(node.decorator_list):
-                line = self._map_lineno(node.lineno, python_line_numbers)
-                raise CompilationError("@server decorator can only be applied to functions", line)
-
-            if isinstance(node, ast.AsyncFunctionDef) and self._has_server_decorator(node.decorator_list):
-                if loader_node is not None:
-                    line = self._map_lineno(node.lineno, python_line_numbers)
-                    raise CompilationError("Multiple @server loaders detected", line)
-                loader_node = node
-
-        if loader_node is None:
-            return None
-
-        if loader_node.col_offset != 0:
-            line = self._map_lineno(loader_node.lineno, python_line_numbers)
-            raise CompilationError("@server loader must be defined at module scope", line)
-
-        if not loader_node.args.args:
-            line = self._map_lineno(loader_node.lineno, python_line_numbers)
-            raise CompilationError("@server loader must accept a `request` argument", line)
-
-        first_arg = loader_node.args.args[0].arg
-        if first_arg != "request":
-            line = self._map_lineno(loader_node.lineno, python_line_numbers)
-            raise CompilationError("First argument of @server loader must be named 'request'", line)
-
-        parameters = tuple(arg.arg for arg in loader_node.args.args)
-        line = self._map_lineno(loader_node.lineno, python_line_numbers)
-        return LoaderDetails(
-            name=loader_node.name,
-            line_number=line,
-            is_async=True,
-            parameters=parameters,
-        )
-
-    def _detect_actions(
-        self,
-        tree: ast.Module | None,
-        python_line_numbers: Sequence[int],
-        loader: LoaderDetails | None,
-    ) -> tuple[ActionDetails, ...]:
-        """Return metadata for every ``@action``-decorated function in the module.
-
-        Raises ``CompilationError`` when:
-        - an ``@action`` is applied to a sync function (must be async)
-        - an ``@action`` is applied to a class
-        - an ``@action`` function is defined outside module scope
-        - an ``@action`` function lacks a ``request`` first argument
-        - the same function carries both ``@server`` and ``@action``
-        - two ``@action`` functions share the same name
-        """
-        if tree is None:
-            return ()
-
-        seen_names: set[str] = set()
-        actions: list[ActionDetails] = []
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and self._has_action_decorator(node.decorator_list):
-                line = self._map_lineno(node.lineno, python_line_numbers)
-                raise CompilationError("@action must be declared as async", line)
-
-            if isinstance(node, ast.ClassDef) and self._has_action_decorator(node.decorator_list):
-                line = self._map_lineno(node.lineno, python_line_numbers)
-                raise CompilationError("@action decorator can only be applied to functions", line)
-
-            if not isinstance(node, ast.AsyncFunctionDef):
-                continue
-            if not self._has_action_decorator(node.decorator_list):
-                continue
-
-            line = self._map_lineno(node.lineno, python_line_numbers)
-
-            if self._has_server_decorator(node.decorator_list):
-                raise CompilationError(
-                    "@action and @server cannot both be applied to the same function",
-                    line,
-                )
-
-            if node.col_offset != 0:
-                raise CompilationError("@action function must be defined at module scope", line)
-
-            if not node.args.args:
-                raise CompilationError("@action function must accept a `request` argument", line)
-
-            first_arg = node.args.args[0].arg
-            if first_arg != "request":
-                raise CompilationError(
-                    "First argument of @action function must be named 'request'", line
-                )
-
-            if node.name in seen_names:
-                raise CompilationError(
-                    f"Duplicate @action name '{node.name}' — action names must be unique per page",
-                    line,
-                )
-
-            seen_names.add(node.name)
-            parameters = tuple(arg.arg for arg in node.args.args)
-            actions.append(
-                ActionDetails(
-                    name=node.name,
-                    line_number=line,
-                    is_async=True,
-                    parameters=parameters,
-                )
-            )
-
-        return tuple(actions)
-
-    def _collect_head_elements(
-        self,
-        tree: ast.Module | None,
-        python_line_numbers: Sequence[int],
-    ) -> tuple[tuple[str, ...], bool]:
-        if tree is None:
-            return tuple(), False
-
-        elements: list[str] = []
-        head_is_dynamic = False
-
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "HEAD":
-                elements = []
-                head_is_dynamic = True
-                continue
-
-            if not isinstance(node, ast.Assign):
-                continue
-
-            if not any(isinstance(target, ast.Name) and target.id == "HEAD" for target in node.targets):
-                continue
-
-            line = self._map_lineno(node.lineno, python_line_numbers)
-            literal = self._extract_head_literal(node.value, line)
-            if literal is None:
-                elements = []
-                head_is_dynamic = True
-                continue
-
-            elements = literal
-            head_is_dynamic = False
-
-        return tuple(elements), head_is_dynamic
-
-    def _detect_script_declarations(self, jsx_code: str) -> tuple[dict, ...]:
-        """Extract <Script src=... strategy=... /> declarations from JSX using Babel AST."""
-        from .jsx_parser import parse_jsx_components
-
-        result = parse_jsx_components(jsx_code, target_components={"Script"})
-        if result.error:
-            # Fallback to empty tuple if JSX parsing fails
-            return ()
-
-        scripts: list[dict] = []
-        for component in result.components:
-            if component.name == "Script" and component.props:
-                scripts.append(component.props)
-        return tuple(scripts)
-
-    def _detect_image_declarations(self, jsx_code: str) -> tuple[dict, ...]:
-        """Extract <Image src=... width=... height=... /> declarations from JSX using Babel AST."""
-        from .jsx_parser import parse_jsx_components
-
-        result = parse_jsx_components(jsx_code, target_components={"Image"})
-        if result.error:
-            # Fallback to empty tuple if JSX parsing fails
-            return ()
-
-        images: list[dict] = []
-        for component in result.components:
-            if component.name == "Image" and component.props:
-                images.append(component.props)
-        return tuple(images)
-
-    def _detect_head_jsx_blocks(self, jsx_code: str) -> tuple[str, ...]:
-        """Extract <Head>...</Head> blocks from JSX using Babel AST."""
-        from .jsx_parser import parse_jsx_components
-
-        result = parse_jsx_components(jsx_code, target_components={"Head"})
-        if result.error:
-            # Fallback to empty tuple if JSX parsing fails
-            return ()
-
-        blocks: list[str] = []
-        for component in result.components:
-            if component.name == "Head" and component.children:
-                content = component.children.strip()
-                if content:
-                    blocks.append(content)
-        return tuple(blocks)
-
-    def _extract_head_literal(self, value: ast.AST, line: int | None) -> list[str] | None:
-        """Return literal HEAD entries or ``None`` when the assignment is dynamic."""
-
-        if isinstance(value, ast.Constant):
-            literal = value.value
-            if literal is None:
-                return []
-            if isinstance(literal, str):
-                return [literal]
-            raise CompilationError("HEAD must be assigned a string or list of strings", line)
-
-        if isinstance(value, (ast.List, ast.Tuple)):
-            normalized: list[str] = []
-            for element in value.elts:
-                if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
-                    return None
-                normalized.append(element.value)
-            return normalized
-
-        return None
-
-    @staticmethod
-    def _map_lineno(lineno: int | None, python_line_numbers: Sequence[int]) -> int | None:
-        if lineno is None or lineno < 1:
-            return lineno
-        if not python_line_numbers:
-            return lineno
-        index = min(lineno - 1, len(python_line_numbers) - 1)
-        return python_line_numbers[index]
-
-    def _update_python_expression_state(
-        self,
-        line: str,
-        current_string: _StringTracker | None,
-        paren_depth: int,
-        bracket_depth: int,
-        brace_depth: int,
-    ) -> tuple[_StringTracker | None, int, int, int, bool]:
-        idx = 0
-        length = len(line)
-        string_state = current_string
-
-        while idx < length:
-            if string_state is not None:
-                idx, string_state = self._consume_python_string(line, idx, string_state)
-                continue
-
-            char = line[idx]
-
-            if char == "#":
-                break
-
-            if char in _STRING_PREFIX_CHARS:
-                prefixed = self._match_prefixed_string(line, idx)
-                if prefixed is not None:
-                    tracker, literal_index = prefixed
-                    if tracker.triple:
-                        string_state = tracker
-                        idx = literal_index
-                    else:
-                        idx, string_state = self._consume_python_string(line, literal_index, tracker)
-                    continue
-
-            if char in ("'", '"'):
-                # Check for triple-quoted strings first
-                if line.startswith(char * 3, idx):
-                    tracker = _StringTracker(delimiter=char * 3, triple=True)
-                    string_state = tracker
-                    idx += 3
-                else:
-                    tracker = _StringTracker(delimiter=char, triple=False)
-                    idx, string_state = self._consume_python_string(line, idx + 1, tracker)
-                continue
-
-            if char in "([{":
-                if char == "(":
-                    paren_depth += 1
-                elif char == "[":
-                    bracket_depth += 1
-                else:
-                    brace_depth += 1
-                idx += 1
-                continue
-
-            if char in ")]}":
-                if char == ")":
-                    paren_depth = max(0, paren_depth - 1)
-                elif char == "]":
-                    bracket_depth = max(0, bracket_depth - 1)
-                else:
-                    brace_depth = max(0, brace_depth - 1)
-                idx += 1
-                continue
-
-            idx += 1
-
-        stripped = line.rstrip()
-        line_continuation = (
-            string_state is None
-            and not (paren_depth or bracket_depth or brace_depth)
-            and bool(stripped)
-            and stripped.endswith("\\")
-        )
-
-        return string_state, paren_depth, bracket_depth, brace_depth, line_continuation
-
-    @staticmethod
-    def _match_prefixed_string(line: str, index: int) -> tuple[_StringTracker, int] | None:
-        idx = index
-        length = len(line)
-
-        while idx < length and line[idx] in _STRING_PREFIX_CHARS:
-            idx += 1
-
-        if idx >= length:
-            return None
-
-        if line.startswith('"""', idx) or line.startswith("'''", idx):
-            quote = line[idx : idx + 3]
-            return _StringTracker(delimiter=quote, triple=True), idx + 3
-
-        if line[idx] in ("'", '"'):
-            quote = line[idx]
-            return _StringTracker(delimiter=quote, triple=False), idx + 1
-
-        return None
-
-    @staticmethod
-    def _consume_python_string(
-        line: str,
-        index: int,
-        tracker: _StringTracker,
-    ) -> tuple[int, _StringTracker | None]:
-        i = index
-        length = len(line)
-        if tracker.triple:
-            closing = tracker.delimiter
-        else:
-            closing = tracker.delimiter
-
-        while i < length:
-            char = line[i]
-            if char == "\\":
-                i = min(i + 2, length)
-                continue
-            if tracker.triple:
-                if line.startswith(closing, i):
-                    return i + len(closing), None
-                i += 1
-                continue
-            if char == closing:
-                return i + 1, None
-            i += 1
-
-        return length, tracker
-
-    @staticmethod
-    def _has_server_decorator(decorators: Sequence[ast.expr]) -> bool:
-        for deco in decorators:
-            target = deco
-            if isinstance(deco, ast.Call):
-                target = deco.func
-            if isinstance(target, ast.Name) and target.id == "server":
-                return True
-            if isinstance(target, ast.Attribute) and target.attr == "server":
-                return True
-        return False
-
-    @staticmethod
-    def _has_action_decorator(decorators: Sequence[ast.expr]) -> bool:
-        for deco in decorators:
-            target = deco
-            if isinstance(deco, ast.Call):
-                target = deco.func
-            if isinstance(target, ast.Name) and target.id == "action":
-                return True
-            if isinstance(target, ast.Attribute) and target.attr == "action":
-                return True
-        return False
-
-
-class _PythonState:
-    """Track indentation and string state for Python segments."""
-
-    def __init__(self, *, parser: PyxParser):
-        self._parser = parser
-        self.reset_for_new_segment()
-
-    def reset_for_new_segment(self) -> None:
-        self.indent_stack: list[int] = [0]
-        self.expect_indent = False
-        self.string_state: _StringTracker | None = None
-        self.paren_depth = 0
-        self.bracket_depth = 0
-        self.brace_depth = 0
-        self.line_continuation = False
-
-    def advance(
-        self,
-        *,
-        line: str,
-        stripped: str,
-        indent: int,
-        line_number: int,
-    ) -> None:
-        self.expect_indent = self._parser._update_python_indentation(
-            self.indent_stack,
-            indent,
-            stripped,
-            line_number,
-            self.expect_indent,
-            bool(
-                self.line_continuation
-                or self.paren_depth
-                or self.bracket_depth
-                or self.brace_depth
-            ),
-            self.string_state,
-        )
-        (
-            self.string_state,
-            self.paren_depth,
-            self.bracket_depth,
-            self.brace_depth,
-            self.line_continuation,
-        ) = self._parser._update_python_expression_state(
-            line,
-            self.string_state,
-            self.paren_depth,
-            self.bracket_depth,
-            self.brace_depth,
-        )
-
-    def can_switch_segments(self, indent: int) -> bool:
-        if self.string_state is not None:
-            return False
-        if self.expect_indent:
-            return False
-        if self.line_continuation:
-            return False
-        if self.paren_depth or self.bracket_depth or self.brace_depth:
-            return False
-        if indent == 0:
-            return True
-        return len(self.indent_stack) == 1 and self.indent_stack[0] == indent
+        return ast.parse(python_code, mode="exec", type_comments=True)

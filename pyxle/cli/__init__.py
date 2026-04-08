@@ -776,6 +776,13 @@ def check(
         warnings.append("No package.json found")
 
     # --- Compile all .pyx files ---
+    #
+    # Tolerant mode collects every diagnostic per file instead of stopping
+    # at the first error, so a single ``pyxle check`` run reports ALL
+    # syntax/structural problems across the project in one pass.
+    # ``validate_jsx=True`` adds Babel-backed JSX syntax validation so
+    # broken JSX (``<Tag>...<`` unclosed, mismatched braces, etc.) is
+    # surfaced here instead of waiting for the build step.
     pyx_count = 0
     diagnostics: list[tuple[str, str]] = []  # (file, message) pairs
     if pages_dir.is_dir():
@@ -784,11 +791,30 @@ def check(
         parser = PyxParser()
         for pyx_file in sorted(pages_dir.rglob("*.pyx")):
             pyx_count += 1
+            rel_path = str(pyx_file.relative_to(project_root))
+            # Tolerant-mode parse should never raise, but we defensively
+            # wrap each call so any unexpected parser bug on a single
+            # file doesn't abort the entire check and lose the
+            # diagnostics for every file that follows.
             try:
-                parser.parse(pyx_file, tolerant=False)
-            except CompilationError as exc:
-                rel_path = str(pyx_file.relative_to(project_root))
-                diagnostics.append((rel_path, str(exc)))
+                result = parser.parse(
+                    pyx_file, tolerant=True, validate_jsx=True
+                )
+            except Exception as exc:  # noqa: BLE001 — defensive CLI boundary
+                diagnostics.append(
+                    (
+                        rel_path,
+                        f"[python] parser crashed: {type(exc).__name__}: "
+                        f"{exc}",
+                    )
+                )
+                continue
+            for diag in result.diagnostics:
+                if diag.line is not None:
+                    message = f"[{diag.section}] line {diag.line}: {diag.message}"
+                else:
+                    message = f"[{diag.section}] {diag.message}"
+                diagnostics.append((rel_path, message))
 
     # --- Report ---
     logger.info(f"Checked {pyx_count} .pyx file(s) in {project_root.name}/")

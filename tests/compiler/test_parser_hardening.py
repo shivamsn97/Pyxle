@@ -1,7 +1,12 @@
-"""Tests for parser hardening: fence-based deterministic parsing, ast.parse()
-repair, JSX import detection, and ambiguous-line edge cases.
+"""Tests for parser hardening: JSX import detection, ambiguous-line
+edge cases, and full-file edge cases.
 
-Phase 1.7 of the Pyxle roadmap.
+Originally added in Phase 1.7 of the Pyxle roadmap. After the parser
+rewrite to AST-driven multi-section detection, the tests that exercised
+the (now-removed) heuristic repair pass, internal helpers, and
+``# ---`` fence markers were replaced by behavior-equivalent tests
+that exercise the same patterns through the public
+``PyxParser.parse_text`` API.
 """
 
 from __future__ import annotations
@@ -10,188 +15,67 @@ from textwrap import dedent
 
 import pytest
 
-from pyxle.compiler.parser import PyxParser, _SegmentNode, _LineNode
+from pyxle.compiler.parser import PyxParser
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse(text: str) -> "PyxParser":
+def _parse(text: str):
     """Parse text and return the result."""
     return PyxParser().parse_text(dedent(text).strip("\n"))
 
 
 # ---------------------------------------------------------------------------
-# Fence-based deterministic parsing
+# AST-driven segmentation behavior (replaces the removed heuristic repair tests)
 # ---------------------------------------------------------------------------
 
 
-class TestFencedParsing:
-    """When explicit section markers are present, heuristic switching is disabled."""
+class TestAstSegmentationBehavior:
+    """Behavior tests that replace the removed _try_repair_document tests.
 
-    def test_server_and_client_fences_split_cleanly(self):
+    Each test exercises an input pattern that the old heuristic+repair
+    pipeline had to "fix up" via backtracking. The new AST-driven walker
+    handles them correctly in one pass.
+    """
+
+    def test_assignment_like_jsx_classified_as_jsx(self):
+        """A line like ``config = <Provider value={ctx}>`` (which has '='
+        and used to be misclassified as Python by the old heuristics)
+        ends up in the JSX section."""
         result = _parse("""
-            # --- server ---
             from pyxle.runtime import server
 
             @server
             async def loader(request):
-                return {"title": "Hello"}
+                return {}
 
-            # --- client ---
-            import React from 'react';
+            config = <Provider value={ctx}>;
 
-            export default function Page({ data }) {
-                return <h1>{data.title}</h1>;
-            }
-        """)
-        assert "from pyxle.runtime import server" in result.python_code
-        assert "@server" in result.python_code
-        assert "import React" in result.jsx_code
-        assert "export default" in result.jsx_code
-        assert result.loader is not None
-        assert result.loader.name == "loader"
-
-    def test_fenced_python_section_keeps_jsx_looking_code(self):
-        """JSX-like content inside a server fence stays Python."""
-        result = _parse("""
-            # --- server ---
-            template = "<div>hello</div>"
-            config = {"key": "value"}
-
-            # --- client ---
             export default function Page() {
-                return <div>Hello</div>;
+                return <div />;
             }
         """)
-        assert 'template = "<div>hello</div>"' in result.python_code
-        assert "config = " in result.python_code
-        # The template string should NOT leak into JSX
-        assert 'template = ' not in result.jsx_code
+        assert "config = <Provider value={ctx}>;" in result.jsx_code
+        assert "config = <Provider value={ctx}>;" not in result.python_code
 
-    def test_fenced_jsx_section_keeps_python_looking_code(self):
-        """Python-looking content inside a client fence stays JSX."""
+    def test_strong_python_markers_stay_python(self):
+        """Lines starting with ``import``, ``def``, ``class``, ``@`` are
+        Python and don't get reclassified even when surrounded by
+        JSX-shaped content."""
         result = _parse("""
-            # --- server ---
-            x = 1
+            from math import sqrt
 
-            # --- client ---
-            import os
-            for item in items:
-                pass
             export default function Page() {
-                return <div>Hello</div>;
+                return <div>{sqrt(4)}</div>;
             }
         """)
-        # "import os" inside client fence should be JSX, not Python
-        assert "import os" not in result.python_code
-        assert "import os" in result.jsx_code
-        # "for item in items:" inside client fence should be JSX
-        assert "for item in items:" in result.jsx_code
-
-    def test_multiple_fence_pairs(self):
-        """Multiple server/client fence pairs work correctly."""
-        result = _parse("""
-            # --- server ---
-            x = 1
-
-            # --- client ---
-            const a = 1;
-
-            # --- server ---
-            y = 2
-
-            # --- client ---
-            const b = 2;
-        """)
-        assert "x = 1" in result.python_code
-        assert "y = 2" in result.python_code
-        assert "const a = 1;" in result.jsx_code
-        assert "const b = 2;" in result.jsx_code
-
-    def test_fenced_mode_preserves_blank_lines(self):
-        result = _parse("""
-            # --- server ---
-            x = 1
-
-            y = 2
-
-            # --- client ---
-            <div />
-        """)
-        assert "x = 1" in result.python_code
-        assert "y = 2" in result.python_code
-
-    def test_fenced_mode_preserves_comments_in_section(self):
-        result = _parse("""
-            # --- server ---
-            # This is a Python comment
-            x = 1
-
-            # --- client ---
-            // This is a JS comment
-            <div />
-        """)
-        assert "# This is a Python comment" in result.python_code
-        assert "// This is a JS comment" in result.jsx_code
-
-    def test_python_and_javascript_keywords_in_fences(self):
-        """Both 'python'/'server' and 'javascript'/'client' keywords work."""
-        parser = PyxParser()
-        assert parser._detect_mode_toggle("# --- python ---") == "python"
-        assert parser._detect_mode_toggle("# --- server ---") == "python"
-        assert parser._detect_mode_toggle("# --- javascript ---") == "jsx"
-        assert parser._detect_mode_toggle("# --- client ---") == "jsx"
-        assert parser._detect_mode_toggle("# --- Python Section ---") == "python"
-        assert parser._detect_mode_toggle("# --- Client Component ---") == "jsx"
-
-    def test_fence_with_mixed_keywords_prefers_jsx(self):
-        """When both JSX and Python keywords appear, JSX wins."""
-        parser = PyxParser()
-        # "JavaScript" + "Server" in the same label → JSX takes priority
-        assert parser._detect_mode_toggle("# --- JavaScript/PSX (Client + Server) ---") == "jsx"
-        assert parser._detect_mode_toggle("# --- Client Server ---") == "jsx"
-
-    def test_fence_lines_are_excluded_from_output(self):
-        """Fence marker lines should not appear in python_code or jsx_code."""
-        result = _parse("""
-            # --- server ---
-            x = 1
-            # --- client ---
-            <div />
-        """)
-        assert "# --- server ---" not in result.python_code
-        assert "# --- client ---" not in result.jsx_code
-        assert "# --- server ---" not in result.jsx_code
-        assert "# --- client ---" not in result.python_code
-
-    def test_single_server_fence_without_client_raises(self):
-        """A single server fence without a client fence forces all content into
-        Python, causing a CompilationError for JS-like code."""
-        from pyxle.compiler.exceptions import CompilationError
-
-        with pytest.raises(CompilationError, match="invalid syntax"):
-            _parse("""
-                # --- server ---
-                x = 1
-                const y = 2;
-            """)
-
-
-# ---------------------------------------------------------------------------
-# ast.parse() repair for heuristic mode
-# ---------------------------------------------------------------------------
-
-
-class TestAstParseRepair:
-    """When heuristic classification produces invalid Python, ambiguous segments
-    without strong Python markers are reclassified as JSX."""
+        assert "from math import sqrt" in result.python_code
 
     def test_repair_reclassifies_misidentified_jsx(self):
-        """A line like 'value = something()' that looks like Python but isn't
-        should be reclassified when it breaks ast.parse()."""
-        # This simulates a JSX expression that has '=' in it
+        """End-to-end: a file with both server logic and client-side JSX
+        cleanly splits via the AST walker."""
         result = _parse("""
             from pyxle.runtime import server
 
@@ -209,100 +93,131 @@ class TestAstParseRepair:
         assert result.loader is not None
         assert "export default" in result.jsx_code
 
-    def test_repair_reclassifies_assignment_like_jsx(self):
-        """An assignment-like JSX line (has '=') that the heuristic treats as
-        Python should be reclassified to JSX when ast.parse fails."""
-        # The heuristic sees 'config = ...' at indent 0 with '=' and
-        # classifies as Python.  But without import/def/@, repair kicks in.
-        parser = PyxParser()
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text="config = <Provider value={ctx}>"),
-        ])
-        doc = parser._build_document([])
-        doc.segments = [segment]
-        parser._try_repair_document(doc)
-        assert segment.kind == "jsx"
+    def test_unparseable_input_in_tolerant_mode_does_not_crash(self):
+        """Tolerant-mode parsing of complete junk doesn't raise — it
+        emits a diagnostic and returns whatever could be salvaged."""
+        result = PyxParser().parse_text("???\n@@@", tolerant=True)
+        assert result is not None
+        assert isinstance(result.diagnostics, tuple)
 
-    def test_repair_preserves_strong_python(self):
-        """Repair should NOT reclassify segments with import/def/class/@."""
-        parser = PyxParser()
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text="from math import sqrt"),
-            _LineNode(number=2, text="const x = <div>;"),  # invalid Python
-        ])
-        doc = parser._build_document([])
-        doc.segments = [segment]
-        # Should NOT reclassify because of the strong "from" marker
-        parser._try_repair_document(doc)
-        assert segment.kind == "python"
+    def test_unterminated_python_string_routed_to_python_diagnostic(self):
+        """An unterminated Python string literal must produce a
+        ``[python]`` diagnostic, not silently flow into the JSX
+        section. Regression test for the manual-tests audit bug where
+        ``x = "this string never closes`` followed by valid JSX would
+        be absorbed into the first JSX segment and never reported.
+        """
+        src = (
+            'x = "this string never closes\n'
+            'y = 1\n'
+            '\n'
+            "import React from 'react';\n"
+            "export default function Page() { return <div />; }\n"
+        )
+        result = PyxParser().parse_text(src, tolerant=True)
+        assert any(
+            d.section == "python" and "unterminated string" in d.message
+            for d in result.diagnostics
+        ), f"expected [python] unterminated string diagnostic, got {result.diagnostics!r}"
 
-    def test_repair_handles_lineno_none(self):
-        """Repair exits gracefully when SyntaxError has no line number."""
-        # This is a defensive test — in practice lineno is almost always set.
-        parser = PyxParser()
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text="???"),
-        ])
-        doc = parser._build_document([])
-        doc.segments = [segment]
-        # Should not crash
-        parser._try_repair_document(doc)
+    def test_unterminated_python_string_strict_mode_raises(self):
+        """Strict-mode parsing of the same broken input raises
+        ``CompilationError`` instead of silently succeeding."""
+        from pyxle.compiler.exceptions import CompilationError
 
-    def test_repair_handles_error_outside_boundaries(self):
-        """Repair exits when the error line doesn't map to any segment."""
-        parser = PyxParser()
-        # Single segment that is valid Python
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text="x = 1"),
-        ])
-        doc = parser._build_document([])
-        doc.segments = [segment]
-        # Valid code, no repair needed
-        parser._try_repair_document(doc)
-        assert segment.kind == "python"
+        src = (
+            'x = "this string never closes\n'
+            'y = 1\n'
+            '\n'
+            "import React from 'react';\n"
+            "export default function Page() { return <div />; }\n"
+        )
+        with pytest.raises(CompilationError):
+            PyxParser().parse_text(src)
 
-    def test_no_repair_for_fenced_mode(self):
-        """Fenced mode should NOT trigger repair — errors are real."""
-        parser = PyxParser()
-        result = parser.parse_text(dedent("""
-            # --- server ---
-            x = 1
-        """).strip("\n"))
-        # Valid fenced Python, no repair needed
-        assert "x = 1" in result.python_code
+    def test_bare_assignment_with_unknown_jsx_starter_flagged(self):
+        """A bare assignment that isn't a JSX element and doesn't match
+        any JSX top-level starter is suspicious — if it fails to parse
+        as Python, the error is reported as a Python diagnostic.
+        """
+        src = (
+            'data = {"broken": \n'  # unterminated dict/string
+            "import React from 'react';\n"
+            "export default function Page() { return <div />; }\n"
+        )
+        result = PyxParser().parse_text(src, tolerant=True)
+        assert any(
+            d.section == "python" for d in result.diagnostics
+        ), f"expected [python] diagnostic, got {result.diagnostics!r}"
 
-    def test_repair_does_not_reclassify_strong_python(self):
-        """Segments with imports, defs, or decorators should not be reclassified."""
-        parser = PyxParser()
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text="import os"),
-            _LineNode(number=2, text="something invalid"),
-        ])
-        assert parser._has_strong_python_markers(segment) is True
+    def test_jsx_segment_with_less_than_before_element_not_flagged(self):
+        """A JSX segment whose first non-blank line is a bare-identifier
+        assignment containing a less-than comparison before the actual
+        JSX element tag should still be recognized as JSX. The element
+        scanner walks past non-element ``<`` characters so a later
+        ``<Component`` is still picked up. Exercises the continuation
+        branch in ``_contains_jsx_element_marker``.
+        """
+        result = _parse("""
+            from pyxle.runtime import server
 
-    def test_has_strong_python_markers_detects_defs(self):
-        parser = PyxParser()
-        for code in ["def foo():", "async def bar():", "class Baz:", "@decorator", '"""docstring"""', "from x import y"]:
-            segment = _SegmentNode(kind="python", lines=[
-                _LineNode(number=1, text=code),
-            ])
-            assert parser._has_strong_python_markers(segment) is True, f"Failed for: {code}"
+            @server
+            async def loader(request):
+                return {}
 
-    def test_has_strong_python_markers_false_for_assignments(self):
-        parser = PyxParser()
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text="value = something"),
-        ])
-        assert parser._has_strong_python_markers(segment) is False
+            guard = x < 10 ? <Warning /> : <Safe />;
 
-    def test_has_strong_python_markers_skips_blanks_and_comments(self):
-        parser = PyxParser()
-        segment = _SegmentNode(kind="python", lines=[
-            _LineNode(number=1, text=""),
-            _LineNode(number=2, text="# comment"),
-            _LineNode(number=3, text="value = 1"),
-        ])
-        assert parser._has_strong_python_markers(segment) is False
+            export default function Page() { return <div />; }
+        """)
+        assert "guard = x < 10" in result.jsx_code
+        assert not result.diagnostics
+
+    def test_deeply_nested_source_emits_diagnostic_not_crash(self):
+        """A source with extreme nesting depth exhausts CPython's
+        parser stack (``MemoryError`` / ``RecursionError``). The
+        parser must catch these at the outer boundary and emit a
+        structured diagnostic rather than letting them propagate and
+        crash the CLI mid-scan.
+
+        The combination of deep nesting AND a trailing non-Python
+        section (the JSX) is what triggers ``MemoryError``: CPython
+        cannot recover from the JSX syntax error when its parser
+        stack is already exhausted by the nested expression.
+        """
+        nested_loader = (
+            "@server\n"
+            "async def loader(request):\n"
+            "    return " + "[" * 200 + "1" + "]" * 200 + "\n"
+            "\n"
+            "import React from 'react';\n"
+            "export default function Page() { return <div />; }\n"
+        )
+        result = PyxParser().parse_text(nested_loader, tolerant=True)
+        # Should not crash, and should emit a [python] diagnostic
+        # about parser exhaustion.
+        assert any(
+            d.section == "python" and "exhausted" in d.message
+            for d in result.diagnostics
+        ), f"expected parser-exhausted diagnostic, got {result.diagnostics!r}"
+
+    def test_jsx_segment_starting_with_async_function_recognized(self):
+        """A JSX segment whose first non-blank line begins with
+        ``async function`` is valid JSX top-level and must not trigger
+        the broken-Python heuristic. Exercises the ``async function``
+        branch in ``_looks_like_jsx_toplevel``."""
+        result = _parse("""
+            from pyxle.runtime import server
+
+            @server
+            async def loader(request):
+                return {}
+
+            async function helper() { return 1; }
+
+            export default function Page() { return <div />; }
+        """)
+        assert "async function helper()" in result.jsx_code
+        assert not result.diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -311,44 +226,38 @@ class TestAstParseRepair:
 
 
 class TestJsxImportDetection:
-    """import X from 'path' (with quotes) is always JSX, never Python."""
+    """``import X from 'path'`` (with quotes) is always JSX, never Python."""
 
-    def test_default_import_with_quotes(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import React from 'react'") is True
-        assert parser._looks_like_js_import('import React from "react"') is True
+    @pytest.mark.parametrize(
+        "import_stmt",
+        [
+            "import React from 'react'",
+            'import React from "react"',
+            "import { useState } from 'react'",
+            "import './styles.css'",
+            'import "./styles.css"',
+            "import 'normalize.css'",
+            'import "lodash"',
+            "import type { FC } from 'react'",
+            "import * as React from 'react'",
+        ],
+    )
+    def test_js_imports_classified_as_jsx(self, import_stmt: str):
+        """Each JS-style import lands in jsx_code, never python_code."""
+        result = _parse(
+            f"{import_stmt};\n\nexport default function P() {{ return <div />; }}"
+        )
+        assert import_stmt in result.jsx_code
+        assert import_stmt not in result.python_code
 
-    def test_named_import_with_braces(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import { useState } from 'react'") is True
-
-    def test_side_effect_import_single_quotes(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import './styles.css'") is True
-
-    def test_side_effect_import_double_quotes(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import('import "./styles.css"') is True
-
-    def test_side_effect_import_no_semicolon(self):
-        """Side-effect imports without semicolons should still be detected."""
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import 'normalize.css'") is True
-        assert parser._looks_like_js_import('import "lodash"') is True
-
-    def test_import_type(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import type { FC } from 'react'") is True
-        assert parser._looks_like_js_import("import type Props") is True
-
-    def test_import_with_semicolon(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import foo;") is True
-
-    def test_python_import_not_detected_as_js(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import os") is False
-        assert parser._looks_like_js_import("import sys") is False
+    @pytest.mark.parametrize("import_stmt", ["import os", "import sys"])
+    def test_python_imports_classified_as_python(self, import_stmt: str):
+        """Stdlib-style ``import NAME`` (no quotes) is Python."""
+        result = _parse(
+            f"{import_stmt}\n\nimport React from 'react';\n"
+            "export default function P() { return <div />; }"
+        )
+        assert import_stmt in result.python_code
 
     def test_side_effect_import_classified_as_jsx(self):
         """Side-effect imports should end up in jsx_code, not python_code."""
@@ -369,21 +278,35 @@ class TestJsxImportDetection:
         assert "import 'normalize.css'" in result.jsx_code
         assert "import 'normalize.css'" not in result.python_code
 
-    def test_star_import_with_quotes(self):
-        parser = PyxParser()
-        assert parser._looks_like_js_import("import * as React from 'react'") is True
-
 
 # ---------------------------------------------------------------------------
-# Ambiguous line edge cases
+# Ambiguous line edge cases (now via behavior tests)
 # ---------------------------------------------------------------------------
+
+
+_JSX_TAIL = "\n\nexport default function P() { return <div />; }"
+
+
+def _assert_in_python(snippet: str):
+    result = _parse(snippet + _JSX_TAIL)
+    assert snippet in result.python_code, (
+        f"{snippet!r} should be Python but ended up in jsx_code"
+    )
+
+
+def _assert_in_jsx(snippet: str):
+    result = _parse(snippet + _JSX_TAIL)
+    assert snippet in result.jsx_code, (
+        f"{snippet!r} should be JSX but ended up in python_code"
+    )
 
 
 class TestAmbiguousLines:
-    """Edge cases where lines could be Python or JSX."""
+    """Edge cases where lines could be Python or JSX. All assertions go
+    through the public ``parse_text`` API; no calls to internal helpers."""
 
     def test_import_from_with_quotes_is_jsx(self):
-        """import X from 'path' is JSX, not Python from...import."""
+        """``import X from 'path'`` is JSX, not Python ``from … import``."""
         result = _parse("""
             import React from 'react';
 
@@ -395,7 +318,7 @@ class TestAmbiguousLines:
         assert result.python_code.strip() == ""
 
     def test_python_import_is_python(self):
-        """import os (no quotes) is Python."""
+        """``import os`` (no quotes) is Python."""
         result = _parse("""
             import os
 
@@ -408,66 +331,75 @@ class TestAmbiguousLines:
         assert "import os" in result.python_code
 
     def test_assignment_with_semicolon_is_jsx(self):
-        """Assignments ending in `;` are JSX."""
-        parser = PyxParser()
-        assert parser._is_probable_python("value = something;", 0, False) is False
-        assert parser._is_probable_js("value = something;", 0) is True
+        """JS-style assignments (``const`` / ``let`` / ``var``) are JSX.
+
+        Note: a plain ``value = something;`` IS valid Python (the semicolon
+        separates statements), so we use a JS-only construct here.
+        """
+        _assert_in_jsx("const value = something;")
 
     def test_comment_hash_is_python(self):
-        """# comments are always Python in auto mode."""
-        parser = PyxParser()
-        assert parser._is_probable_python("# this is a comment", 0, False) is True
+        """``#`` comments at module level are Python."""
+        # A standalone Python comment is consumed by the Python segment.
+        result = _parse(
+            "# this is a comment\nx = 1\n\n"
+            "export default function P() { return <div />; }"
+        )
+        assert "# this is a comment" in result.python_code
 
     def test_comment_double_slash_is_jsx(self):
-        """// comments are always JSX."""
-        parser = PyxParser()
-        assert parser._is_probable_js("// this is a comment", 0) is True
-
-    def test_if_without_colon_is_not_python(self):
-        """if (condition) is JSX/JS, not Python (no colon)."""
-        parser = PyxParser()
-        assert parser._is_probable_python("if (condition)", 0, False) is False
+        """``//`` comments are JSX."""
+        _assert_in_jsx("// this is a comment")
 
     def test_if_with_colon_is_python(self):
-        """if condition: is Python."""
-        parser = PyxParser()
-        assert parser._is_probable_python("if condition:", 0, False) is True
-
-    def test_for_without_colon_is_not_python(self):
-        parser = PyxParser()
-        assert parser._is_probable_python("for (let i = 0; i < 10; i++)", 0, False) is False
+        """``if condition:`` is Python."""
+        _assert_in_python("if True:\n    x = 1")
 
     def test_angle_bracket_is_jsx(self):
-        """Lines starting with < are JSX."""
-        parser = PyxParser()
-        assert parser._is_probable_js("<div className='test'>", 0) is True
-        assert parser._is_probable_js("<Component />", 0) is True
+        """Lines starting with ``<`` are JSX."""
+        result = _parse(
+            "import React from 'react';\n\n"
+            "export default function P() {\n"
+            "    return <Component />;\n"
+            "}"
+        )
+        assert "<Component />" in result.jsx_code
 
     def test_export_is_jsx(self):
-        parser = PyxParser()
-        assert parser._is_probable_js("export default function Page() {}", 0) is True
-        assert parser._is_probable_js("export const value = 1;", 0) is True
+        _assert_in_jsx("export default function Page() {}")
 
-    def test_const_let_var_are_jsx(self):
-        parser = PyxParser()
-        assert parser._is_probable_js("const x = 1;", 0) is True
-        assert parser._is_probable_js("let y = 2;", 0) is True
-        assert parser._is_probable_js("var z = 3;", 0) is True
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            "const x = 1;",
+            "let y = 2;",
+            "var z = 3;",
+        ],
+    )
+    def test_const_let_var_are_jsx(self, snippet: str):
+        _assert_in_jsx(snippet)
 
     def test_triple_quoted_string_is_python(self):
-        parser = PyxParser()
-        assert parser._is_probable_python('"""docstring"""', 0, False) is True
-        assert parser._is_probable_python("'''another'''", 0, False) is True
+        """A bare triple-quoted string is a Python expression statement
+        (typically a docstring)."""
+        result = _parse(
+            '"""docstring"""\nx = 1\n\n'
+            "export default function P() { return <div />; }"
+        )
+        assert '"""docstring"""' in result.python_code
 
     def test_decorator_is_python(self):
-        parser = PyxParser()
-        assert parser._is_probable_python("@dataclass", 0, False) is True
-        assert parser._is_probable_python("@server", 0, False) is True
+        result = _parse("""
+            from dataclasses import dataclass
 
-    def test_indented_code_is_python_in_heuristic_mode(self):
-        """Indented lines are always Python in heuristic mode."""
-        parser = PyxParser()
-        assert parser._is_probable_python("    return value", 4, False) is True
+            @dataclass
+            class Foo:
+                x: int = 1
+
+            export default function P() { return <div />; }
+        """)
+        assert "@dataclass" in result.python_code
+        assert "class Foo" in result.python_code
 
     def test_template_literal_not_misidentified(self):
         """Template literals (backtick strings) should stay JSX."""
@@ -481,19 +413,28 @@ class TestAmbiguousLines:
         """)
         assert "const name = `hello world`" in result.jsx_code
 
-    def test_await_classified_as_jsx(self):
-        """Top-level 'await' is classified as JSX."""
-        parser = PyxParser()
-        assert parser._is_probable_js("await fetch('/api')", 0) is True
-
     def test_async_function_keyword_is_jsx(self):
-        """'async function' (JS style) is classified as JSX."""
-        parser = PyxParser()
-        assert parser._is_probable_js("async function handleClick() {}", 0) is True
+        """``async function`` (JS style) is JSX."""
+        result = _parse("""
+            import React from 'react';
+
+            export default function P() {
+                async function handleClick() { return 1; }
+                return <button onClick={handleClick} />;
+            }
+        """)
+        assert "async function handleClick" in result.jsx_code
 
     def test_function_keyword_is_jsx(self):
-        parser = PyxParser()
-        assert parser._is_probable_js("function helper() {}", 0) is True
+        """Standalone ``function`` keyword is JSX."""
+        result = _parse("""
+            import React from 'react';
+
+            function helper() { return 1; }
+
+            export default function P() { return <div>{helper()}</div>; }
+        """)
+        assert "function helper" in result.jsx_code
 
 
 # ---------------------------------------------------------------------------
@@ -573,9 +514,8 @@ class TestFullFileParsing:
         assert "export default" in result.jsx_code
         assert result.loader is None
 
-    def test_fenced_file_with_loader_and_actions(self):
+    def test_file_with_loader_and_actions(self):
         result = _parse("""
-            # --- server ---
             from pyxle.runtime import server, action
 
             @server
@@ -586,7 +526,6 @@ class TestFullFileParsing:
             async def add_item(request):
                 return {"ok": True}
 
-            # --- client ---
             import React from 'react';
 
             export default function Page({ data }) {
@@ -596,20 +535,6 @@ class TestFullFileParsing:
         assert result.loader is not None
         assert len(result.actions) == 1
         assert result.actions[0].name == "add_item"
-        assert "export default" in result.jsx_code
-
-    def test_fenced_with_python_and_javascript_keywords(self):
-        """Alternate keyword styles for fences."""
-        result = _parse("""
-            # --- python ---
-            x = 42
-
-            # --- javascript ---
-            export default function Page() {
-                return <div>42</div>;
-            }
-        """)
-        assert "x = 42" in result.python_code
         assert "export default" in result.jsx_code
 
     def test_comment_only_python_section(self):
@@ -643,7 +568,6 @@ class TestFullFileParsing:
     def test_python_dict_with_jsx_like_values(self):
         """Python dicts can have string values that look like JSX."""
         result = _parse("""
-            # --- server ---
             from pyxle.runtime import server
 
             @server
@@ -653,7 +577,6 @@ class TestFullFileParsing:
                     "body": "<p>World</p>",
                 }
 
-            # --- client ---
             export default function Page({ data }) {
                 return <div>{data.title}</div>;
             }
