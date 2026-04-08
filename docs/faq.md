@@ -122,10 +122,21 @@ Add it to the config:
 }
 ```
 
-Or link it in your root layout's `HEAD`:
+Or link it in your root layout's `<Head>`:
 
-```python
-HEAD = '<link rel="stylesheet" href="/styles/reset.css" />'
+```jsx
+import { Head } from 'pyxle/client';
+
+export default function RootLayout({ children }) {
+  return (
+    <html lang="en">
+      <Head>
+        <link rel="stylesheet" href="/styles/reset.css" />
+      </Head>
+      <body>{children}</body>
+    </html>
+  );
+}
 ```
 
 ## Deployment

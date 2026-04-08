@@ -69,15 +69,13 @@ Created automatically when you run `pyxle dev` or `pyxle build`. Contains compil
 
 A `.pyx` file combines Python server logic with a React component. The scaffold's index page demonstrates:
 
-- `HEAD` variable for document `<head>` elements
 - `@server` decorator for data loading
 - React JSX for the UI
+- The `<Head>` component from `pyxle/client` for document `<head>` elements
 
 ```python
 # Python section
 from pyxle import __version__
-
-HEAD = '<title>My App</title>'
 
 @server
 async def load_home(request):
@@ -86,8 +84,17 @@ async def load_home(request):
 
 ```jsx
 // JSX section -- receives loader data as props
+import { Head } from 'pyxle/client';
+
 export default function HomePage({ data }) {
-  return <h1>{data.message}</h1>;
+  return (
+    <>
+      <Head>
+        <title>My App</title>
+      </Head>
+      <h1>{data.message}</h1>
+    </>
+  );
 }
 ```
 

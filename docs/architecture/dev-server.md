@@ -1,0 +1,507 @@
+# The dev server
+
+`pyxle dev` is the command you'll spend the most time with. It runs a
+Starlette ASGI app on port 8000, a Vite subprocess on port 5173, an
+SSR worker pool, an incremental compiler, a file watcher, and a
+WebSocket error overlay — all coordinated as a single async program.
+
+This doc explains how those pieces fit together. By the end you'll
+understand what every line in the startup banner means, what happens
+when you save a file, and how to read the dev server's source code.
+
+**Files (`pyxle/devserver/`):**
+
+| File | What it does |
+|---|---|
+| `__init__.py` (~290) | The `DevServer` class and the top-level lifecycle |
+| `starlette_app.py` (~820) | Creates the Starlette ASGI app and routers |
+| `settings.py` (~150) | The frozen `DevServerSettings` config object |
+| `scanner.py` (~100) | Walks `pages/` and computes file content hashes |
+| `builder.py` (~165) | Orchestrates one incremental build pass |
+| `watcher.py` (~350) | Watches the filesystem and debounces events |
+| `vite.py` (~370) | Spawns and supervises the Vite subprocess |
+| `proxy.py` (~155) | Forwards Vite-served URLs to Vite's port |
+| `registry.py` (~380) | Loads compiled metadata into a `RouteTable` |
+| `routes.py` (~280) | The `PageRoute` / `ApiRoute` / `ActionRoute` dataclasses |
+| `layouts.py` (~295) | Generates layout-wrapped client modules |
+| `overlay.py` (~105) | WebSocket overlay for error notifications |
+| `error_pages.py` (~140) | Discovers `error.pyx` and `not-found.pyx` boundaries |
+| `route_hooks.py` (~225) | Per-route middleware policies |
+| `middleware.py` (~75) | Loads custom user middleware modules |
+| `tailwind.py` (~300) | Optional Tailwind CSS watcher |
+| `csrf.py` (~160) | CSRF protection middleware |
+| `client_files.py` (~2170) | Bundled client runtime sources |
+| `scripts.py`, `styles.py` | Global script and stylesheet resolution |
+
+That's a lot. Most of it doesn't matter for understanding how the
+dev server works at a high level. The key pieces are: the
+**Starlette app**, the **builder**, the **watcher**, **Vite**, and
+the **registry**. Everything else is supporting infrastructure
+around those five.
+
+---
+
+## Lifecycle in one diagram
+
+```
+$ pyxle dev
+   │
+   ▼
+1. Load config
+   - Read pyxle.config.json
+   - Apply env vars
+   - Apply CLI flags
+   - Build a frozen DevServerSettings
+   │
+   ▼
+2. Initial compile (builder.py)
+   - Scan pages/ for .pyx and .py files
+   - Compile every file via PyxParser + ArtifactWriter
+   - Write .pyxle-build/{server,client,metadata}/ artifacts
+   - Compose layouts
+   - Build the metadata registry → RouteTable
+   │
+   ▼
+3. Start Vite (vite.py)
+   - Spawn `vite dev --port 5173`
+   - Wait for TCP readiness on port 5173
+   - Auto-restart if Vite crashes
+   │
+   ▼
+4. Start the SSR worker pool (ssr/worker_pool.py)
+   - Spawn N persistent Node.js workers (default: 1)
+   - Each worker speaks NDJSON on stdin/stdout
+   │
+   ▼
+5. Build the Starlette app (starlette_app.py)
+   - Register page, API, action routes
+   - Add middleware (CORS, CSRF, static, custom, Vite proxy)
+   - Add health endpoints (/healthz, /readyz)
+   - Add WebSocket route for the overlay
+   │
+   ▼
+6. Start the file watcher (watcher.py)
+   - Watch pages/, public/, global stylesheets/scripts
+   - Debounce events for 250ms
+   - On change: rebuild via builder.py and reload registry
+   │
+   ▼
+7. Start uvicorn on port 8000
+   - The Starlette app is now serving requests
+```
+
+When all seven steps are done, the console shows:
+
+```
+ℹ️  Starting Pyxle dev server on http://127.0.0.1:8000 with Vite proxy at http://127.0.0.1:5173
+ℹ️  Preparing Pyxle development server
+✅ Initial build completed — 14 page(s) compiled; 1 API module(s) copied
+ℹ️  Discovered 13 page route(s) and 1 API route(s)
+ℹ️  Launching Vite dev server: vite dev --config ... --port 5173
+ℹ️  [vite]   VITE v5.4.21  ready in 188 ms
+✅ Vite dev server ready at http://127.0.0.1:5173 (0.30s)
+ℹ️  Starting Starlette on http://127.0.0.1:8000 (Vite proxy at http://127.0.0.1:5173)
+```
+
+You can read those lines in order against the seven steps above —
+each `ℹ️` log is one piece of the lifecycle reporting that it's
+done.
+
+---
+
+## The Starlette app
+
+`create_starlette_app()` (`devserver/starlette_app.py:506`) is the
+factory function that builds the entire ASGI application. It returns
+a `Starlette` instance with:
+
+### Routes
+
+- **Page routes** (`build_page_router()`, line 291) — one Starlette
+  `Route` per `PageRoute` in the route table. Each route has a
+  closure handler that knows which page to render.
+- **API routes** (`build_api_router()`, line 187) — one Starlette
+  endpoint per `pages/api/*.py` file. Functions named after HTTP
+  methods (`get`, `post`, etc.) get registered for those methods;
+  a function named `handle` gets all methods.
+- **Action routes** (`build_action_router()`, line 363) — POST-only
+  endpoints under `/api/__actions/{name}` for every `@action`
+  decorated function.
+- **Static asset mount** (`build_client_assets_mount()`, line 498)
+  — serves `/client/*` and `/dist/*` directly from disk.
+- **Public files mount** (`build_static_files_mount()`, line 485)
+  — serves whatever's in `public/`.
+- **Health endpoints** — `/healthz` and `/readyz` for orchestration.
+- **Catch-all 404** — walks up the request path looking for the
+  nearest `not-found.pyx` boundary.
+- **WebSocket route** at `/__pyxle/overlay` — used by the dev
+  overlay client.
+
+### Middleware stack
+
+Listed from outermost to innermost (outermost runs first on request,
+last on response):
+
+1. **GZip** — production only
+2. **CORS** — if `cors` is configured in `pyxle.config.json`
+3. **CSRF** — if `csrf.enabled` is true in config
+4. **`StaticAssetsMiddleware`** — short-circuits requests for
+   `/client/*` and public assets so they don't reach the page router
+5. **Custom user middleware** — anything declared in
+   `pyxle.config.json` `middleware: ["mymodule:MyMiddleware"]`
+6. **Vite proxy** — dev only, forwards JS/CSS/HMR requests to Vite
+
+The middleware stack is built in `create_starlette_app()` line
+~668. Each middleware is added with `Middleware(...)` and Starlette
+chains them in order.
+
+### Lifespan hooks
+
+Starlette has a `lifespan` callback that runs on startup and
+shutdown. Pyxle uses it to:
+
+- **Start the SSR worker pool** on startup
+- **Stop the worker pool gracefully** on shutdown (give workers 5
+  seconds to exit cleanly, then kill any holdouts)
+
+This means workers are alive for the lifetime of the dev server,
+not per-request.
+
+---
+
+## The incremental builder
+
+`build_once()` (`devserver/builder.py:50`) is the function that
+runs **one build pass** — initial compile, or rebuild after a file
+change. It:
+
+1. **Scans `pages/`** with `scanner.scan_source_tree()` to find
+   every `.pyx`, `pages/api/*.py`, and client asset file. For each
+   file, it computes the SHA256 hash of the contents.
+2. **Compares hashes against the previous build's metadata** to
+   find which files actually changed since last time.
+3. **Compiles only the changed `.pyx` files** by calling
+   `compile_file()` for each. Unchanged files are left alone.
+4. **Copies API modules** (`pages/api/*.py`) to their build location.
+5. **Composes layouts** for any pages whose ancestor `layout.pyx`
+   files have changed (`layouts.compose_layout_templates()`).
+6. **Syncs global stylesheets and scripts** declared in the config.
+7. **Removes orphaned artifacts** for source files that have been
+   deleted since the last build.
+8. **Returns a `BuildSummary`** dataclass with counts: pages
+   compiled, APIs copied, etc.
+
+The hash-based diffing is the key to performance. A typical 50-page
+project has *thousands* of unchanged files at any moment; running
+the parser on every one of them on every save would be wasteful.
+With hash diffing, a single-file edit triggers exactly one
+`compile_file()` call.
+
+Source: `devserver/builder.py:50-160`.
+
+### When does a layout-only change trigger a page rebuild?
+
+Layouts are tricky: when you edit `pages/dashboard/layout.pyx`,
+**every page under `pages/dashboard/`** needs its composed route
+module regenerated. The composed module is what bundles the layout
+with the page, so it needs to be re-emitted whenever the layout's
+identity changes.
+
+The builder handles this by recompiling layouts first, then
+re-running the layout composition pass for any page whose ancestor
+layout was rebuilt. This is invisible to you — you save the layout,
+and a moment later the affected pages reload in the browser.
+
+---
+
+## The watcher
+
+`ProjectWatcher` (`devserver/watcher.py:101`) wraps Python's
+`watchdog` library to observe filesystem events. It's structured as:
+
+1. A **watchdog observer** running in a background thread, posting
+   raw events to a queue.
+2. A **debounce buffer** that aggregates events for 250ms (the
+   default; configurable). Saving a file twice in quick succession
+   only triggers one rebuild.
+3. A **dispatch callback** that the dev server registers; the
+   watcher calls it with the set of changed paths after the debounce
+   window expires.
+
+The dispatch callback runs `build_once()` and then refreshes the
+metadata registry. If the build fails (e.g., a parser error), the
+watcher captures the exception and broadcasts it to the WebSocket
+overlay so the browser can display the error inline.
+
+### Module cache invalidation
+
+When a `.pyx` file's *Python half* changes, the dev server's existing
+imported version of the compiled `.py` is stale. Python's import
+system caches modules in `sys.modules` — re-importing the same module
+key returns the cached version.
+
+The watcher purges the cached module from `sys.modules` after every
+rebuild, so the next request that needs it triggers a fresh import.
+Source: `devserver/watcher.py:286`.
+
+This is why Python edits show up immediately without restarting the
+dev server. The hot-reload story is: write file → watcher fires →
+incremental build → module cache purged → next request reads the
+new code.
+
+### What's watched
+
+By default, the watcher observes:
+
+- `pages/` — recursive
+- `public/` — recursive
+- Any file referenced in `globalStyles` or `globalScripts` config
+- The `pyxle.config.json` itself (changing the config triggers a
+  full restart, not a hot-reload)
+
+It does **not** watch `node_modules/`, `.pyxle-build/`, `dist/`, or
+any dotfiles. Those are either output directories (changing them
+would loop) or noise.
+
+---
+
+## Vite integration
+
+`ViteProcess` (`devserver/vite.py:21`) supervises the Vite dev
+server subprocess. The Vite process is responsible for:
+
+- Bundling JSX for the browser (with React Refresh / HMR)
+- Serving static assets from `.pyxle-build/client/`
+- Handling client-side hot module replacement when JSX files change
+
+Pyxle's dev server **does not** serve JS/CSS to the browser
+directly. Instead, it **proxies** asset requests to Vite's port.
+This sounds inefficient but it isn't: the proxy just forwards bytes,
+and Vite is the JS expert.
+
+### Spawning Vite
+
+`ViteProcess` tries several command resolutions to find Vite:
+
+1. `node_modules/.bin/vite` — local install via npm
+2. `node_modules/vite/bin/vite.js` — local install, called via
+   `node`
+3. `npx vite` — fallback if neither local install exists
+
+Each candidate is validated with `--version` before being committed
+to. If Vite isn't installed at all, Pyxle automatically runs
+`npm install` to restore dependencies. (This is also why a fresh
+`pyxle init` works on the second `pyxle dev`: the first attempt
+notices the missing dependencies and installs them.)
+
+Source: `devserver/vite.py:225`.
+
+### Readiness probing
+
+After spawning Vite, Pyxle polls Vite's TCP port (default 5173)
+every 100ms until it accepts connections. Once it does, Vite is
+"ready" and Pyxle starts serving page requests. The whole readiness
+window is usually under a second.
+
+If Vite takes longer than 10 seconds to come up, Pyxle reports a
+timeout and shuts down — usually a sign that something else is
+holding port 5173.
+
+### Auto-restart
+
+If the Vite subprocess exits unexpectedly (crashes, OOMs, gets
+killed), Pyxle's monitor coroutine catches the exit and schedules a
+restart after 0.5 seconds. The restart probes for readiness again
+and re-attaches to the proxy.
+
+This is invisible during normal use but essential for long dev
+sessions: it keeps Vite running across edits to its config, plugin
+errors, and Node version mismatches without requiring you to
+restart the dev server.
+
+Source: `devserver/vite.py:302`.
+
+### The proxy
+
+`ViteProxy` (`devserver/proxy.py:40`) is a small ASGI middleware
+that forwards specific URLs to Vite. It matches:
+
+- Anything ending in `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.css`,
+  or `.map`
+- Anything starting with `/@vite/` (Vite's internal endpoints)
+- `/@react-refresh` (the HMR endpoint)
+
+For matching requests, it uses `httpx.AsyncClient.stream()` to
+forward chunks without buffering, so a 5MB CSS file doesn't get
+loaded into Pyxle's memory before being sent to the browser. Headers
+are filtered to drop hop-by-hop fields.
+
+For non-matching requests, the middleware passes through to the
+next layer (the page/API router).
+
+---
+
+## The metadata registry
+
+`MetadataRegistry` (`devserver/registry.py`) is the in-memory map
+from route paths to `PageRoute` / `ApiRoute` / `ActionRoute`
+objects.
+
+`build_metadata_registry()` (line 118) walks
+`.pyxle-build/metadata/` and reads each `.json` file. For every
+page, it constructs a `PageRoute` containing:
+
+- The route path (primary)
+- Any alias paths (from optional catch-all routes)
+- Paths to the server module, client module, and metadata
+- The Python module key for `importlib`
+- Loader name and line number
+- Static head metadata
+- Action metadata
+
+The dev server then iterates the registry to register Starlette
+routes. After every rebuild, the registry is **rebuilt from scratch**
+— Pyxle never tries to incrementally patch the registry, because
+the cost of a full rebuild is small (millisecond range for typical
+projects) and the correctness is much easier to reason about.
+
+### Layout head discovery
+
+A layout's `<Head>` JSX block contributes to every page below it.
+At registry-build time, `find_layout_head_jsx_blocks()` walks
+ancestor directories of each page looking for `layout.pyx` (and
+`template.pyx`) metadata, collects their `head_jsx_blocks`, and
+attaches the merged list to the page's `PageRoute`. The SSR
+pipeline reads this at request time without re-parsing.
+
+Source: `devserver/registry.py:337`.
+
+---
+
+## The error overlay
+
+`OverlayManager` (`devserver/overlay.py:24`) maintains a set of
+WebSocket connections from browser tabs. When the dev server has
+something to tell the browser — a build error, a runtime error, a
+successful rebuild — it broadcasts a JSON message to every
+connected client.
+
+Event types:
+
+- `"error"` — sent when a build fails or a runtime error occurs.
+  Includes the error message, stack, and "breadcrumbs" describing
+  which stage of the request pipeline failed (loader, render, head
+  evaluation, etc.).
+- `"clear"` — sent when a previously-failing route succeeds. The
+  client uses this to dismiss any visible error overlay.
+- `"reload"` — sent after a successful rebuild. The client triggers
+  a soft reload of the current page.
+
+The browser-side overlay client lives in `pyxle/client/` and is
+included in the default scaffold.
+
+---
+
+## How a request flows through the dev server
+
+Putting everything together, here's what happens when the browser
+asks for a page in dev mode:
+
+```
+GET /dashboard
+   │
+   ▼
+ASGI app (Starlette)
+   │
+   ▼
+1. Static asset middleware
+   "Is /dashboard a file in /client/ or /public/?"
+   No → pass through
+   │
+   ▼
+2. CORS / CSRF middleware (if enabled)
+   "Is the request allowed?"
+   Yes → pass through
+   │
+   ▼
+3. Custom user middleware (if any)
+   "Anything to do here?"
+   No → pass through
+   │
+   ▼
+4. Vite proxy
+   "Does /dashboard look like a Vite asset?"
+   No → pass through
+   │
+   ▼
+5. Page router
+   "Is /dashboard in the route table?"
+   Yes → invoke the page handler closure
+   │
+   ▼
+6. Page handler
+   - Look up the PageRoute
+   - In dev mode, purge stale modules from sys.modules
+   - Call the SSR pipeline (build_page_response)
+   │
+   ▼
+7. SSR pipeline (see ssr.md)
+   - Run loader
+   - Resolve head
+   - Render component on a worker
+   - Assemble document
+   - Stream response
+   │
+   ▼
+HTML response → browser
+```
+
+The browser then loads `/client/...` URLs for the JS bundle, which
+hit the static asset middleware and get forwarded to Vite via the
+proxy. Vite serves them, and React hydrates.
+
+---
+
+## What the dev server is *not*
+
+Let me list a few things the dev server explicitly does **not** do,
+because the absences are part of the design:
+
+- **It doesn't bundle JS itself.** Vite does. Pyxle is a Python
+  framework that proxies a JavaScript bundler — it doesn't try to
+  out-Vite Vite.
+- **It doesn't watch your `node_modules/`.** Adding a dependency
+  requires `pip install` (Python) or `npm install` (JS) followed by
+  a manual `pyxle dev` restart. We could watch them, but it would
+  triple the watcher's event volume for marginal value.
+- **It doesn't have its own caching layer.** The render cache lives
+  inside the SSR worker (esbuild caches its bundles). The metadata
+  cache is the registry. There's no application-level cache.
+- **It doesn't guess about routes.** Every route comes from a real
+  file on disk. There is no `routes.py` or `urls.py` you can
+  manipulate at runtime.
+- **It doesn't have a "production mode" toggle in dev.** `pyxle dev`
+  is dev. `pyxle serve` is production. They are different commands
+  for different lifecycles, and trying to make one mode mimic the
+  other usually papers over real differences.
+
+These absences are deliberate. The dev server is meant to be small
+enough that you can read it cover to cover in an afternoon and
+understand exactly what it does.
+
+---
+
+## Where to read next
+
+- **[Server-side rendering](ssr.md)** — What happens *inside* a
+  page handler: loader execution, head merging, component rendering
+  on a worker, document assembly, streaming, and client-side
+  navigation.
+
+- **[Build and serve](build-and-serve.md)** — How `pyxle build`
+  takes the same compiled artifacts that `pyxle dev` produces and
+  packages them for production, and how `pyxle serve` runs without
+  Vite or the file watcher.
+
+- **[The CLI](cli.md)** — How `pyxle dev` parses its flags and
+  config and bridges them to `DevServerSettings`.

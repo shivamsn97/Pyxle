@@ -66,9 +66,6 @@ from pyxle.runtime import server, action
 # Original imports from the .pyx file
 from datetime import datetime
 
-# HEAD variable (if static)
-HEAD = '<title>My Page</title>'
-
 # Loader function
 @server
 async def load_page(request):
@@ -87,9 +84,17 @@ The compiled JSX module contains:
 
 ```jsx
 import React from 'react';
+import { Head } from 'pyxle/client';
 
 export default function MyPage({ data }) {
-  return <h1>{data.now}</h1>;
+  return (
+    <>
+      <Head>
+        <title>My Page</title>
+      </Head>
+      <h1>{data.now}</h1>
+    </>
+  );
 }
 ```
 

@@ -47,12 +47,28 @@ Complete API and configuration reference.
 - [Runtime API](reference/runtime-api.md) -- `@server`, `@action`, `LoaderError`, `ActionError`
 - [Client API](reference/client-api.md) -- All client-side components and hooks
 
+## Architecture
+
+The complete architecture handbook -- a guided tour of how Pyxle is built on the inside, written for everyone from "I just installed Pyxle yesterday" to "I want to send a PR that touches the SSR worker pool."
+
+- [Architecture overview](architecture/README.md) -- Start here. Index of every architecture doc.
+- [Request lifecycle](architecture/overview.md) -- One HTTP request, end to end, in one read.
+- [The .pyx file format](architecture/pyx-files.md) -- Why Pyxle invented a new file extension.
+- [The parser](architecture/parser.md) -- How `.pyx` files get split into Python and JSX using only `ast.parse`. The most sensitive code in the framework.
+- [The compiler](architecture/compiler.md) -- How parsed pages become `.py` + `.jsx` + `.json` artifacts.
+- [Routing](architecture/routing.md) -- File-based routing, dynamic segments, catch-all routes, layouts, error boundaries.
+- [The dev server](architecture/dev-server.md) -- Starlette + Vite + the file watcher + the incremental builder + the WebSocket overlay.
+- [Server-side rendering](architecture/ssr.md) -- Loader execution, the Node.js worker pool, head merging, document assembly, streaming.
+- [Build and serve](architecture/build-and-serve.md) -- What `pyxle build` and `pyxle serve` do for production.
+- [The runtime](architecture/runtime.md) -- The `@server` and `@action` decorators and the *zero-magic* contract.
+- [The CLI](architecture/cli.md) -- `pyxle init`, `dev`, `build`, `serve`, `check`. Config precedence and tolerant-mode validation.
+
 ## Advanced
 
 For framework contributors and power users.
 
-- [SSR Pipeline](advanced/ssr-pipeline.md) -- How server-side rendering works under the hood
-- [Compiler Internals](advanced/compiler-internals.md) -- How `.pyx` files are parsed and compiled
+- [SSR Pipeline](advanced/ssr-pipeline.md) -- High-level SSR overview (see [architecture/ssr.md](architecture/ssr.md) for the full deep-dive)
+- [Compiler Internals](advanced/compiler-internals.md) -- High-level compiler overview (see [architecture/compiler.md](architecture/compiler.md) and [architecture/parser.md](architecture/parser.md) for the full deep-dive)
 
 ## FAQ
 

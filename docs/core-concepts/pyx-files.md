@@ -4,13 +4,11 @@ A `.pyx` file is the fundamental building block of a Pyxle application. It combi
 
 ## Anatomy of a `.pyx` file
 
-A `.pyx` file has up to three sections:
+A `.pyx` file has two sections:
 
 ```python
 # 1. Python section -- runs on the server
 from datetime import datetime
-
-HEAD = '<title>My Page</title>'
 
 @server
 async def load_page(request):
@@ -19,8 +17,17 @@ async def load_page(request):
 
 ```jsx
 // 2. JSX section -- runs on both server (SSR) and client
+import { Head } from 'pyxle/client';
+
 export default function MyPage({ data }) {
-  return <h1>Current time: {data.now}</h1>;
+  return (
+    <>
+      <Head>
+        <title>My Page</title>
+      </Head>
+      <h1>Current time: {data.now}</h1>
+    </>
+  );
 }
 ```
 
@@ -31,15 +38,12 @@ The compiler automatically detects which lines are Python and which are JSX. Pyt
 The Python section runs entirely on the server. It can:
 
 - **Import modules** -- any Python package available in your environment
-- **Define a `HEAD` variable** -- static or dynamic `<head>` elements
 - **Define a `@server` loader** -- an async function that fetches data for the component
 - **Define `@action` mutations** -- async functions callable from the client
 
 ```python
 from pyxle.runtime import server, action
 import httpx
-
-HEAD = '<title>Users</title>'
 
 @server
 async def load_users(request):
@@ -68,16 +72,24 @@ async def delete_user(request):
 The JSX section is a standard React component. It runs on both the server (for SSR) and the client (for hydration and interactivity).
 
 ```jsx
+import { Head } from 'pyxle/client';
+
 export default function MyPage({ data }) {
   const [count, setCount] = React.useState(0);
 
   return (
-    <div>
-      <h1>Users: {data.users.length}</h1>
-      <button onClick={() => setCount(c => c + 1)}>
-        Clicked {count} times
-      </button>
-    </div>
+    <>
+      <Head>
+        <title>Users</title>
+        <meta name="description" content="Our user directory." />
+      </Head>
+      <div>
+        <h1>Users: {data.users.length}</h1>
+        <button onClick={() => setCount(c => c + 1)}>
+          Clicked {count} times
+        </button>
+      </div>
+    </>
   );
 }
 ```
@@ -90,45 +102,62 @@ export default function MyPage({ data }) {
 - **Can import from `node_modules`.** Any npm package in your `package.json` is available.
 - **Cannot import Python code.** The Python and JSX sections are compiled separately.
 
-## The `HEAD` variable
+## Controlling the document `<head>`
 
-The `HEAD` variable controls what goes in the document `<head>`:
+Use the `<Head>` component from `pyxle/client` to control what goes in the document `<head>`:
 
-```python
-# Static HEAD -- a string or list of strings
-HEAD = '<title>About Us</title><meta name="description" content="Our story" />'
+```jsx
+import { Head } from 'pyxle/client';
 
-# Or as a list
-HEAD = [
-    '<title>About Us</title>',
-    '<meta name="description" content="Our story" />',
-]
+export default function AboutPage({ data }) {
+  return (
+    <>
+      <Head>
+        <title>About Us</title>
+        <meta name="description" content="Our story" />
+        <link rel="canonical" href="https://example.com/about" />
+      </Head>
+      <h1>About Us</h1>
+    </>
+  );
+}
 ```
 
-For dynamic head content that depends on loader data, use a callable:
+Anything inside `<Head>` is extracted during SSR and inlined into the document `<head>`. It supports dynamic values via normal JSX interpolation:
 
-```python
+```jsx
+import { Head } from 'pyxle/client';
+
 @server
 async def load_post(request):
     post = await fetch_post(request.path_params["slug"])
     return {"post": post}
 
-HEAD = lambda data: [
-    f'<title>{data["post"]["title"]}</title>',
-    f'<meta name="description" content="{data["post"]["excerpt"]}" />',
-]
+
+export default function BlogPost({ data }) {
+  return (
+    <>
+      <Head>
+        <title>{data.post.title} — My Blog</title>
+        <meta name="description" content={data.post.excerpt} />
+      </Head>
+      <article>
+        <h1>{data.post.title}</h1>
+        {/* ... */}
+      </article>
+    </>
+  );
+}
 ```
 
-Dynamic `HEAD` values are automatically sanitised to prevent XSS injection -- angle brackets inside `<title>` text are escaped, event handler attributes are stripped, and `javascript:` URLs are neutralised.
+Head values are automatically sanitised to prevent XSS injection -- angle brackets inside `<title>` text are escaped, event handler attributes are stripped, and `javascript:` URLs are neutralised.
 
-See [Head Management](../guides/head-management.md) for full details.
+> **Note:** Pyxle also supports a lower-level `HEAD` Python variable for the rare cases where you want fully static head metadata extracted at compile time. For everyday pages, prefer the `<Head>` component. See [Head Management](../guides/head-management.md) for both mechanisms and when to use each.
 
 ## A complete example
 
 ```python
 from datetime import datetime, timezone
-
-HEAD = lambda data: f'<title>{data["greeting"]}</title>'
 
 @server
 async def load_home(request):
@@ -143,9 +172,14 @@ async def load_home(request):
 ```
 
 ```jsx
+import { Head } from 'pyxle/client';
+
 export default function HomePage({ data }) {
   return (
     <main>
+      <Head>
+        <title>{data.greeting}</title>
+      </Head>
       <h1>{data.greeting}</h1>
       <p>Welcome to Pyxle.</p>
     </main>

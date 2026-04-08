@@ -128,9 +128,36 @@ ActionError(message: str, status_code: int = 400, data: dict | None = None)
 | `.status_code` | `int` | HTTP status code |
 | `.data` | `dict` | Additional data (empty dict if None was passed) |
 
-## `HEAD` variable
+## Document `<head>` elements
 
-Not part of `pyxle.runtime` but available in every `.pyx` file. Controls document `<head>` elements.
+Pyxle offers two ways to contribute elements to the document `<head>`: the `<Head>` component (**recommended**) and the `HEAD` Python variable (lower-level alternative). Both are merged with automatic deduplication.
+
+### `<Head>` component (recommended)
+
+Imported from `pyxle/client`, usable anywhere in your JSX tree:
+
+```jsx
+import { Head } from 'pyxle/client';
+
+export default function Page({ data }) {
+  return (
+    <>
+      <Head>
+        <title>{data.title}</title>
+        <meta name="description" content={data.description} />
+        <link rel="canonical" href={data.canonicalUrl} />
+      </Head>
+      {/* ... */}
+    </>
+  );
+}
+```
+
+See [Head Management](../guides/head-management.md) for the full pattern (layouts, deduplication, reusable SEO components, etc.).
+
+### `HEAD` variable (lower-level alternative)
+
+Not part of `pyxle.runtime` but available in every `.pyx` file. The `HEAD` variable is extracted at compile time by the parser; use it for fully-static head metadata that doesn't need React context, or for pages without a JSX component.
 
 **Static form:**
 
@@ -145,10 +172,11 @@ HEAD = ['<title>Page Title</title>', '<meta name="description" content="..." />'
 **Dynamic form (callable):**
 
 ```python
-HEAD = lambda data: f'<title>{data["title"]}</title>'
+def HEAD(data):
+    return f'<title>{data["title"]}</title>'
 ```
 
-The callable receives the loader's return value. Must return a string or list of strings synchronously.
+The callable receives the loader's return value. Must return a string or list of strings synchronously. For most dynamic head content, the `<Head>` component with normal JSX interpolation is simpler and more flexible.
 
 ## Explicit imports
 

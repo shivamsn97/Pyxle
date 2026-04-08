@@ -103,24 +103,44 @@ Configure Cross-Origin Resource Sharing for API access from other domains:
 
 CORS is **disabled by default** (no `origins` configured). It is only active when you explicitly list allowed origins.
 
-## HEAD element sanitisation
+## Head element sanitisation
 
-Dynamic HEAD content (from `HEAD = lambda data: ...`) is automatically sanitised to prevent XSS:
+Dynamic head content (whether from a `<Head>` JSX block or the lower-level `HEAD` variable) is automatically sanitised to prevent XSS:
 
 - **Title text escaping**: `<` and `>` inside `<title>` elements are escaped to `&lt;` and `&gt;`
 - **Event handler stripping**: `onclick`, `onerror`, `onload`, and all `on*` attributes are removed
 - **Dangerous URL removal**: `javascript:` and `vbscript:` protocol URLs in `href`, `src`, and `action` attributes are stripped
 
-This sanitisation is applied to all head elements -- from layout JSX blocks, page HEAD variables, and page JSX blocks.
+This sanitisation is applied to all head elements from every source — layout `<Head>` blocks, page `<Head>` blocks, and the legacy `HEAD` Python variable.
 
 ### Best practice
 
-Even with auto-sanitisation, always escape user input when interpolating into head elements:
+React already escapes text content by default when you interpolate into JSX, so the `<Head>` component inherits XSS protection automatically:
+
+```jsx
+import { Head } from 'pyxle/client';
+
+export default function Page({ data }) {
+  return (
+    <>
+      <Head>
+        <title>{data.userSubmittedTitle}</title>
+      </Head>
+      {/* ... */}
+    </>
+  );
+}
+```
+
+React escapes `data.userSubmittedTitle` in the text node, and Pyxle's head sanitiser provides a second layer of defense. You don't need `html.escape()` for JSX-driven head content.
+
+For the lower-level `HEAD` Python variable with user-supplied data, escape explicitly:
 
 ```python
 from html import escape
 
-HEAD = lambda data: f'<title>{escape(data["title"])}</title>'
+def HEAD(data):
+    return f'<title>{escape(data["title"])}</title>'
 ```
 
 ## Security headers
