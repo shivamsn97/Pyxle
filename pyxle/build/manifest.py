@@ -32,8 +32,11 @@ def load_manifest(path: Path | str) -> Dict[str, Any]:
 def _validate_asset_paths(data: Dict[str, Any], manifest_path: Path) -> None:
     """Ensure no asset file path escapes the expected build directory.
 
-    Rejects paths containing ``..`` or starting with ``/`` to prevent a
-    compromised Vite build from referencing arbitrary filesystem locations.
+    Rejects paths containing ``../`` (path traversal) or starting with ``/``
+    to prevent a compromised Vite build from referencing arbitrary filesystem
+    locations.  Note: we check for ``../`` rather than ``..`` because Vite
+    may produce filenames like ``__...slug__-hash.js`` for catch-all routes,
+    which legitimately contain ``..`` as a substring.
     """
     for route_key, entry in data.items():
         if not isinstance(entry, dict):
@@ -52,7 +55,7 @@ def _validate_asset_paths(data: Dict[str, Any], manifest_path: Path) -> None:
 def _check_safe_path(
     value: str, route_key: str, field: str, manifest_path: Path
 ) -> None:
-    if ".." in value or value.startswith("/"):
+    if "/../" in value or value.startswith("../") or value.startswith("/"):
         raise ValueError(
             f"Manifest {field} entry for '{route_key}' in "
             f"'{manifest_path}' contains unsafe path: '{value}'"
