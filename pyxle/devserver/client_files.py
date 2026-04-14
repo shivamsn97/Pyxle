@@ -37,6 +37,7 @@ def write_client_bootstrap_files(settings: DevServerSettings) -> None:
         "pyxle/head.jsx": _render_head_component(),
         "pyxle/client-only.jsx": _render_client_only_component(),
         "pyxle/use-action.jsx": _render_use_action_component(),
+        "pyxle/use-pathname.jsx": _render_use_pathname_component(),
         "pyxle/form.jsx": _render_form_component(),
         "pyxle/client.js": _render_client_barrel(),
         "pyxle/index.d.ts": _render_client_runtime_index_types(),
@@ -46,6 +47,7 @@ def write_client_bootstrap_files(settings: DevServerSettings) -> None:
         "pyxle/image.d.ts": _render_image_component_types(),
         "pyxle/head.d.ts": _render_head_component_types(),
         "pyxle/client-only.d.ts": _render_client_only_component_types(),
+        "pyxle/use-pathname.d.ts": _render_use_pathname_component_types(),
     }
 
     for relative_path, contents in files.items():
@@ -1450,6 +1452,8 @@ def _render_client_entry(settings: DevServerSettings) -> str:
                   window.history[method]({ pyxle: true, pagePath: nextPagePath }, '', `${url.pathname}${url.search}${url.hash}`);
                 }
 
+                window.dispatchEvent(new CustomEvent('pyxle:routechange'));
+
                 if (options.scroll !== 'preserve') {
                   window.scrollTo(0, 0);
                 }
@@ -1491,6 +1495,7 @@ def _render_client_entry(settings: DevServerSettings) -> str:
                   '',
                   `${url.pathname}${url.search}${url.hash}`,
                 );
+                window.dispatchEvent(new CustomEvent('pyxle:routechange'));
                 return true;
               } catch (error) {
                 if (!(error instanceof DOMException && error.name === 'AbortError')) {
@@ -2407,6 +2412,65 @@ def _render_form_component() -> str:
     )
 
 
+def _render_use_pathname_component() -> str:
+    return (
+        dedent(
+            """
+            import { useState, useEffect } from 'react';
+
+            /**
+             * usePathname — reactively track the current URL pathname.
+             *
+             * Returns window.location.pathname on the client.  Re-renders
+             * the component whenever Pyxle performs a client-side navigation.
+             * During SSR returns '/'.
+             */
+            export function usePathname() {
+              const [pathname, setPathname] = useState(
+                typeof window !== 'undefined' ? window.location.pathname : '/'
+              );
+
+              useEffect(() => {
+                // Sync on mount in case the SSR value differs.
+                setPathname(window.location.pathname);
+
+                function onRouteChange() {
+                  setPathname(window.location.pathname);
+                }
+
+                window.addEventListener('pyxle:routechange', onRouteChange);
+                window.addEventListener('popstate', onRouteChange);
+                return () => {
+                  window.removeEventListener('pyxle:routechange', onRouteChange);
+                  window.removeEventListener('popstate', onRouteChange);
+                };
+              }, []);
+
+              return pathname;
+            }
+            """
+        ).strip()
+        + "\n"
+    )
+
+
+def _render_use_pathname_component_types() -> str:
+    return (
+        dedent(
+            """
+            /**
+             * Reactively track the current URL pathname.
+             *
+             * Re-renders the component on every client-side navigation.
+             * Returns `'/'` during SSR.
+             */
+            export declare function usePathname(): string;
+            """
+        ).strip()
+        + "\n"
+    )
+
+
 def _render_client_barrel() -> str:
     return (
         dedent(
@@ -2416,6 +2480,7 @@ def _render_client_barrel() -> str:
             export { Image } from './image.jsx';
             export { default as ClientOnly } from './client-only.jsx';
             export { useAction } from './use-action.jsx';
+            export { usePathname } from './use-pathname.jsx';
             export { Form } from './form.jsx';
             export { Link, navigate, prefetch, refresh, Slot, SlotProvider, useSlot, useSlots } from './index.js';
             """
@@ -2439,5 +2504,7 @@ __all__ = [
     "_render_slot_runtime_types",
     "_render_tsconfig",
     "_render_vite_config",
+    "_render_use_pathname_component",
+    "_render_use_pathname_component_types",
     "_build_public_env_defines",
 ]

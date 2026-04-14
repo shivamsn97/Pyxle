@@ -12,6 +12,7 @@ export { Script } from './Script.jsx';
 export { Image } from './Image.jsx';
 export { ClientOnly } from './ClientOnly.jsx';
 export { useAction } from './useAction.jsx';
+export { usePathname } from './usePathname.jsx';
 export { Form } from './Form.jsx';
 
 // Re-export Link and navigation from existing runtime

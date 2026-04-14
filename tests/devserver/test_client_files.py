@@ -15,6 +15,8 @@ from pyxle.devserver.client_files import (
     _render_slot_runtime,
     _render_slot_runtime_types,
     _render_tsconfig,
+    _render_use_pathname_component,
+    _render_use_pathname_component_types,
     _render_vite_config,
     write_client_bootstrap_files,
 )
@@ -335,3 +337,48 @@ def test_client_entry_includes_bfcache_pageshow_handler(tmp_path: Path) -> None:
     assert "addEventListener('pageshow'" in entry or 'addEventListener("pageshow"' in entry
     assert "event.persisted" in entry
     assert "router.refresh()" in entry
+
+
+# ---------------------------------------------------------------------------
+# usePathname hook
+# ---------------------------------------------------------------------------
+
+
+def test_client_entry_dispatches_route_change_event(tmp_path: Path) -> None:
+    """The client runtime dispatches a ``pyxle:routechange`` custom event
+    after both ``navigateTo`` and ``refreshCurrentPage`` complete.  This
+    is the signal consumed by ``usePathname()``."""
+    settings = create_project(tmp_path)
+    entry = _render_client_entry(settings)
+
+    assert "pyxle:routechange" in entry
+    # Must appear at least twice: once in navigateTo, once in refreshCurrentPage.
+    assert entry.count("pyxle:routechange") >= 2
+
+
+def test_use_pathname_component_is_ssr_safe() -> None:
+    """The generated usePathname hook must guard window access for SSR."""
+    source = _render_use_pathname_component()
+    assert "typeof window" in source
+    assert "usePathname" in source
+    assert "pyxle:routechange" in source
+
+
+def test_use_pathname_component_types() -> None:
+    """Type definition declares usePathname returning a string."""
+    types = _render_use_pathname_component_types()
+    assert "usePathname" in types
+    assert "string" in types
+
+
+def test_write_client_bootstrap_files_generates_use_pathname(tmp_path: Path) -> None:
+    """Bootstrap writes both the JSX hook and its type declaration."""
+    settings = create_project(tmp_path)
+    write_client_bootstrap_files(settings)
+
+    hook = (settings.client_build_dir / "pyxle" / "use-pathname.jsx").read_text(encoding="utf-8")
+    assert "usePathname" in hook
+    assert "pyxle:routechange" in hook
+
+    types = (settings.client_build_dir / "pyxle" / "use-pathname.d.ts").read_text(encoding="utf-8")
+    assert "usePathname" in types
