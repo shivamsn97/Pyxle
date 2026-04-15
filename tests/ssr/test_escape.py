@@ -1,5 +1,7 @@
 """Tests for pyxle.ssr._escape — inline-JSON escaping utilities."""
 
+import json
+
 import pytest
 
 from pyxle.ssr._escape import escape_inline_json
@@ -18,12 +20,12 @@ class TestEscapeInlineJson:
     def test_html_comment_open(self):
         result = escape_inline_json("<!-- comment -->")
         assert "<!--" not in result
-        assert "<\\!--" in result
+        assert "\\u003c!--" in result
 
     def test_html_comment_close(self):
         result = escape_inline_json("<!-- comment -->")
         assert "-->" not in result
-        assert "--\\>" in result
+        assert "--\\u003e" in result
 
     def test_unicode_line_separator(self):
         result = escape_inline_json('{"x":"\u2028"}')
@@ -55,11 +57,39 @@ class TestEscapeInlineJson:
         "input_val,expected_fragment",
         [
             ("</", "<\\/"),
-            ("<!--", "<\\!--"),
-            ("-->", "--\\>"),
+            ("<!--", "\\u003c!--"),
+            ("-->", "--\\u003e"),
             ("\u2028", "\\u2028"),
             ("\u2029", "\\u2029"),
         ],
     )
     def test_individual_replacements(self, input_val, expected_fragment):
         assert expected_fragment in escape_inline_json(input_val)
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"raw": "--> shell prompt"},
+            {"raw": "<!-- html comment -->"},
+            {"raw": "</script><script>alert(1)</script>"},
+            {"raw": "line1\u2028line2"},
+            {"nested": {"list": ["-->", "<!--", "</script>"]}},
+            {"combo": "foo --> bar <!-- baz --> qux </script>"},
+        ],
+    )
+    def test_output_is_valid_json_after_escape(self, payload):
+        """Regression: the escaped output MUST still be parseable with
+        JSON.parse / json.loads, and it must round-trip to the original data.
+
+        Earlier versions replaced ``<!--`` with ``<\\!--`` and ``-->`` with
+        ``--\\>``, both of which are invalid JSON escape sequences — this
+        broke every docs page whose rendered content contained a literal
+        ``-->`` (e.g. shell output examples)."""
+        raw = json.dumps(payload, ensure_ascii=False)
+        escaped = escape_inline_json(raw)
+        # Must still parse, and must round-trip to the original data.
+        assert json.loads(escaped) == payload
+        # And none of the dangerous literal sequences survived.
+        assert "</" not in escaped or "<\\/" in escaped
+        assert "<!--" not in escaped
+        assert "-->" not in escaped
