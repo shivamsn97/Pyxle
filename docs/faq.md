@@ -193,7 +193,11 @@ Run `pyxle install` or `npm install` in your project directory.
 
 ### The page renders without styles
 
-Make sure Tailwind is compiled. Run `npm run dev:css` in a separate terminal, or ensure `pyxle dev` is started with `--tailwind` (the default).
+`pyxle dev` compiles Tailwind through PostCSS automatically when
+`postcss.config.cjs` is present (the scaffold default). If you removed
+that file or are on a custom stylesheet setup, re-check your
+[styling configuration](guides/styling.md) — specifically that the
+relevant CSS is imported from a page or layout.
 
 ### Hot reload is not working
 

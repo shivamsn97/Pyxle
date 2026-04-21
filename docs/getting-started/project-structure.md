@@ -75,11 +75,17 @@ A `.pyxl` file combines Python server logic with a React component. The scaffold
 
 ```python
 # Python section
+from datetime import datetime, timezone
 from pyxle import __version__
 
 @server
 async def load_home(request):
-    return {"message": "Hello, world!"}
+    now = datetime.now(tz=timezone.utc)
+    return {
+        "version": __version__,
+        "time": now.strftime("%H:%M:%S UTC"),
+        "message": "You're ready to build with Pyxle.",
+    }
 ```
 
 ```jsx
@@ -88,12 +94,13 @@ import { Head } from 'pyxle/client';
 
 export default function HomePage({ data }) {
   return (
-    <>
+    <main>
       <Head>
-        <title>My App</title>
+        <title>Pyxle App</title>
       </Head>
       <h1>{data.message}</h1>
-    </>
+      <p>Pyxle v{data.version} &middot; {data.time}</p>
+    </main>
   );
 }
 ```
@@ -143,9 +150,12 @@ Defines Node.js dependencies and npm scripts:
 | Script | Purpose |
 |--------|---------|
 | `npm run dev` | Start Vite dev server (used internally by `pyxle dev`) |
-| `npm run build` | Build CSS + bundle with Vite (used by `pyxle build`) |
-| `npm run dev:css` | Watch Tailwind CSS compilation |
-| `npm run build:css` | One-shot minified Tailwind build |
+| `npm run build` | Bundle with Vite (used by `pyxle build`); Tailwind is compiled in-pipeline via PostCSS |
+
+Tailwind is wired through PostCSS (see `postcss.config.cjs`), so Vite
+handles CSS on both `dev` and `build` without a separate script. If you
+want a standalone Tailwind watcher anyway, see
+[Styling guide → Standalone Tailwind](../guides/styling.md).
 
 ### `tailwind.config.cjs`
 

@@ -98,9 +98,17 @@ The `context` object provides metadata about the matched route:
 | `target` | `"page" \| "api"` | Route type |
 | `path` | `str` | URL path pattern |
 | `source_relative_path` | `Path` | File path relative to project root |
+| `source_absolute_path` | `Path` | Absolute file path on disk |
 | `module_key` | `str` | Python import key |
+| `content_hash` | `str` | Hash of the compiled route module — changes when the source changes, stable across reloads |
 | `has_loader` | `bool` | Whether the page has a `@server` loader |
+| `head_elements` | `tuple[str, ...]` | Rendered `<head>` markup registered by the page/layout (SSR only) |
 | `allowed_methods` | `tuple[str, ...]` | HTTP methods the route handles |
+
+`RouteContext` is a frozen dataclass — fields are read-only. A shorthand
+`context.as_dict()` returns a JSON-friendly view (keys camelCased, paths
+as POSIX strings) that Pyxle attaches to `request.scope["pyxle"]["route"]`
+for downstream middleware.
 
 ### Built-in hooks
 

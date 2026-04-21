@@ -57,11 +57,9 @@ def log_next_steps(
     if include_install_hint:
         logger.info("  2. pyxle install   # installs Python + Node dependencies")
         logger.info("     (or run 'pip install -r requirements.txt' and 'npm install')")
-        logger.info("  3. npm run dev:css   # watches Tailwind into public/styles/tailwind.css (separate terminal)")
-        logger.info("  4. pyxle dev")
-    else:
-        logger.info("  2. npm run dev:css   # watches Tailwind into public/styles/tailwind.css (separate terminal)")
         logger.info("  3. pyxle dev")
+    else:
+        logger.info("  2. pyxle dev")
 
 
 def run_init(

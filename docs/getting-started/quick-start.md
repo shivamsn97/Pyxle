@@ -24,23 +24,15 @@ pip install -r requirements.txt
 npm install
 ```
 
-## 3. Build Tailwind CSS
-
-In a separate terminal, start the Tailwind watcher:
-
-```bash
-npm run dev:css
-```
-
-This compiles `pages/styles/tailwind.css` into `public/styles/tailwind.css` and watches for changes. The dev server also auto-starts Tailwind if it detects a config file, so this step is optional if you use `pyxle dev` with the `--tailwind` flag (enabled by default).
-
-## 4. Start the dev server
+## 3. Start the dev server
 
 ```bash
 pyxle dev
 ```
 
-Open [http://localhost:8000](http://localhost:8000) in your browser. You should see the Pyxle landing page with a hero section, feature cards, and a dark mode toggle.
+Open [http://localhost:8000](http://localhost:8000) in your browser. You should see the Pyxle starter page — a centered card showing the framework version, server time, and a link to edit `pages/index.pyxl`.
+
+Tailwind compiles automatically because the scaffold ships with `postcss.config.cjs` — PostCSS runs as part of the Vite pipeline, so there's nothing separate to start.
 
 ## What just happened?
 
@@ -53,24 +45,24 @@ When you ran `pyxle dev`, the framework:
 5. **Rendered HTML on the server** -- sent fully-rendered HTML to the browser (SSR)
 6. **Hydrated on the client** -- React took over the server-rendered HTML for interactivity
 
-## 5. Make a change
+## 4. Make a change
 
-Open `pages/index.pyxl` in your editor. Find the `title` value inside the `load_home` function and change it:
+Open `pages/index.pyxl` in your editor. Change the `message` returned by `load_home`:
 
 ```python
 @server
 async def load_home(request):
+    now = datetime.now(tz=timezone.utc)
     return {
-        "hero": {
-            "title": "Hello from Pyxle!",
-            # ...
-        },
+        "version": __version__,
+        "time": now.strftime("%H:%M:%S UTC"),
+        "message": "Hello from my Pyxle app!",
     }
 ```
 
-Save the file. The browser reloads automatically with your updated title.
+Save the file. The browser reloads automatically with your updated message.
 
-## 6. Check your routes
+## 5. Check your routes
 
 ```bash
 pyxle routes
@@ -84,7 +76,7 @@ Route          File                  Loader
 /api/pulse     pages/api/pulse.py    --
 ```
 
-## 7. Validate your project
+## 6. Validate your project
 
 ```bash
 pyxle check

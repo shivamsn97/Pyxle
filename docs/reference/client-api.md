@@ -6,7 +6,7 @@ All client-side components and hooks are importable from `pyxle/client`:
 import {
   Head, Script, Image, ClientOnly,
   Form, useAction,
-  Link, navigate, prefetch, refresh
+  Link, navigate, prefetch, refresh, usePathname
 } from 'pyxle/client';
 ```
 
@@ -201,6 +201,37 @@ const result = await actionFn(payload);
 - New calls abort previous in-flight requests
 - State resets on each new call
 - `onMutate` fires synchronously before the fetch (use for optimistic UI)
+
+---
+
+### `usePathname()`
+
+Reactive hook that returns the current URL pathname and re-renders on
+client-side navigation.
+
+```jsx
+import { usePathname, Link } from 'pyxle/client';
+
+function NavLink({ href, children }) {
+  const pathname = usePathname();
+  const active = pathname === href;
+  return (
+    <Link href={href} className={active ? 'text-emerald-400' : 'text-zinc-400'}>
+      {children}
+    </Link>
+  );
+}
+```
+
+**Returns:** `string` — the current pathname (e.g. `/dashboard/settings`).
+
+**Behaviour:**
+- Reads `window.location.pathname` on the client
+- During SSR, returns the path currently being rendered (via
+  `globalThis.__PYXLE_CURRENT_PATHNAME__`) so the first client render matches
+  — no hydration mismatch
+- Subscribes to framework navigation events (`Link`, `navigate()`,
+  `refresh()`, `popstate`) and re-renders on change
 
 ---
 
