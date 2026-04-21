@@ -166,12 +166,31 @@ export default entry.contents;
     const headRegistry = createHeadRegistry();
     globalThis.__PYXLE_HEAD_REGISTRY__ = headRegistry;
 
-    const element = React.createElement(Component, props);
-    const html = ReactDOMServer.renderToString(element);
-    const styles = styleRegistry.list();
-    const headElements = headRegistry.list();
-    
-    process.stdout.write(JSON.stringify({ ok: true, html, styles, headElements }));
+    // Expose the request pathname to SSR code (e.g. usePathname).
+    // The subprocess renderer receives it via an env var because the
+    // argv signature is stable and argv already carries large JSON props.
+    const requestPathname = process.env.PYXLE_REQUEST_PATHNAME;
+    const previousPathname = globalThis.__PYXLE_CURRENT_PATHNAME__;
+    if (typeof requestPathname === 'string' && requestPathname.length > 0) {
+      globalThis.__PYXLE_CURRENT_PATHNAME__ = requestPathname;
+    } else {
+      delete globalThis.__PYXLE_CURRENT_PATHNAME__;
+    }
+
+    try {
+      const element = React.createElement(Component, props);
+      const html = ReactDOMServer.renderToString(element);
+      const styles = styleRegistry.list();
+      const headElements = headRegistry.list();
+
+      process.stdout.write(JSON.stringify({ ok: true, html, styles, headElements }));
+    } finally {
+      if (previousPathname === undefined) {
+        delete globalThis.__PYXLE_CURRENT_PATHNAME__;
+      } else {
+        globalThis.__PYXLE_CURRENT_PATHNAME__ = previousPathname;
+      }
+    }
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

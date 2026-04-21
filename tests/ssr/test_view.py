@@ -28,10 +28,18 @@ def anyio_backend() -> str:  # pragma: no cover - fixture wiring
 class StubRenderer:
     def __init__(self) -> None:
         self.calls: list[tuple[Path, dict[str, object]]] = []
+        self.request_pathnames: list[str | None] = []
         self.responses: list[RenderResult] = []
 
-    async def render(self, component_path: Path, props: dict[str, object]) -> RenderResult:
+    async def render(
+        self,
+        component_path: Path,
+        props: dict[str, object],
+        *,
+        request_pathname: str | None = None,
+    ) -> RenderResult:
         self.calls.append((component_path, props))
+        self.request_pathnames.append(request_pathname)
         if self.responses:
             return self.responses.pop(0)
         return RenderResult(html="<div></div>")
@@ -136,6 +144,9 @@ async def test_build_page_response_without_loader(settings: DevServerSettings, t
     assert "nonce=\"" in body
     assert renderer.calls[-1][0] == page.client_module_path
     assert renderer.calls[-1][1] == {"data": {}}
+    # The request path is forwarded to the renderer so SSR code (e.g.
+    # usePathname) sees the real pathname and hydrates without a mismatch.
+    assert renderer.request_pathnames[-1] == "/"
     assert overlay.events == [("clear", "/")]
 
 
@@ -457,7 +468,13 @@ async def load_home(request):
     )
 
     class FailingRenderer(StubRenderer):
-        async def render(self, component_path: Path, props: dict[str, object]) -> str:  # type: ignore[override]
+        async def render(
+            self,
+            component_path: Path,
+            props: dict[str, object],
+            *,
+            request_pathname: str | None = None,
+        ) -> str:  # type: ignore[override]
             raise ComponentRenderError("render boom")
 
     renderer = FailingRenderer()
@@ -515,7 +532,13 @@ async def load_home(request):
     )
 
     class NavFailingRenderer(StubRenderer):
-        async def render(self, component_path: Path, props: dict[str, object]) -> str:  # type: ignore[override]
+        async def render(
+            self,
+            component_path: Path,
+            props: dict[str, object],
+            *,
+            request_pathname: str | None = None,
+        ) -> str:  # type: ignore[override]
             raise ComponentRenderError("render boom")
 
     renderer = NavFailingRenderer()

@@ -34,6 +34,10 @@ function resolveActionUrl(actionName, pagePath) {
   if (!page) {
     if (typeof window !== 'undefined') {
       page = window.location.pathname;
+    } else if (typeof globalThis.__PYXLE_CURRENT_PATHNAME__ === 'string') {
+      // SSR: use the framework-injected request path so the form's action
+      // URL matches the one the client will compute at hydration.
+      page = globalThis.__PYXLE_CURRENT_PATHNAME__;
     } else {
       page = '/';
     }

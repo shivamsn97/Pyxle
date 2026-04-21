@@ -491,6 +491,64 @@ async def test_pool_render_dispatches_request(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_pool_render_includes_request_pathname(tmp_path: Path) -> None:
+    """request_pathname kwarg propagates to the worker payload."""
+    project_root = tmp_path / "project"
+    client_root = project_root / ".pyxle-build" / "client"
+    project_root.mkdir(parents=True)
+    client_root.mkdir(parents=True)
+    component = client_root / "pages" / "page.jsx"
+    component.parent.mkdir(parents=True)
+    component.touch()
+
+    captured_payloads: list[dict[str, Any]] = []
+    responses: list[bytes] = []
+
+    async def fake_read(n: int = -1) -> bytes:
+        await asyncio.sleep(0)
+        if responses:
+            return responses.pop(0)
+        return b""
+
+    mock_proc = MagicMock()
+    mock_proc.stdin = MagicMock()
+    mock_proc.stdin.is_closing.return_value = False
+    mock_proc.stdin.close = MagicMock()
+    mock_proc.stdout = MagicMock()
+    mock_proc.stdout.read = fake_read
+    mock_proc.wait = AsyncMock(return_value=0)
+    mock_proc.kill = MagicMock()
+
+    def capture_write(data: bytes) -> None:
+        payload = json.loads(data.decode().strip())
+        captured_payloads.append(payload)
+        responses.append(
+            (json.dumps({"id": payload["id"], "ok": True, "html": "<x/>", "styles": [], "headElements": []}) + "\n").encode()
+        )
+
+    mock_proc.stdin.write = MagicMock(side_effect=capture_write)
+    mock_proc.stdin.drain = AsyncMock()
+
+    with (
+        patch("pyxle.ssr.worker_pool.shutil.which", return_value="/usr/bin/node"),
+        patch(
+            "pyxle.ssr.worker_pool.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+            return_value=mock_proc,
+        ),
+        patch("pyxle.ssr.worker_pool.Path.exists", return_value=True),
+    ):
+        pool = SsrWorkerPool(size=1, project_root=project_root, client_root=client_root)
+        await pool.start()
+        await pool.render(component, {}, request_pathname="/dashboard")
+        await pool.render(component, {})  # None should omit the key entirely
+        await pool.stop()
+
+    assert captured_payloads[0]["requestPathname"] == "/dashboard"
+    assert "requestPathname" not in captured_payloads[1]
+
+
+@pytest.mark.anyio
 async def test_pool_render_auto_starts_if_not_started(tmp_path: Path) -> None:
     """render() should auto-start the pool if start() was not called explicitly."""
     project_root = tmp_path / "project"

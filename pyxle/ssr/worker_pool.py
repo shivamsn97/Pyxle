@@ -243,8 +243,15 @@ class SsrWorkerPool:
         self,
         component_path: Path,
         props: dict[str, Any],
+        *,
+        request_pathname: str | None = None,
     ) -> dict[str, Any]:
         """Send a render request to the next available worker.
+
+        ``request_pathname`` is forwarded to the worker and exposed to
+        component code via ``globalThis.__PYXLE_CURRENT_PATHNAME__``
+        during SSR, so hooks like ``usePathname`` return the correct
+        path instead of a fallback and hydrate cleanly.
 
         Auto-starts the pool on first call if :meth:`start` was not called
         explicitly.  Raises :class:`WorkerPoolError` if no healthy workers
@@ -267,6 +274,8 @@ class SsrWorkerPool:
             "clientRoot": str(self._client_root),
             "projectRoot": str(self._project_root),
         }
+        if request_pathname is not None:
+            payload["requestPathname"] = request_pathname
 
         try:
             result = await asyncio.wait_for(

@@ -209,7 +209,7 @@ async function main() {
   process.exit(0);
 }
 
-async function renderRequest({ componentPath, props, clientRoot, projectRoot: projectRootArg }) {
+async function renderRequest({ componentPath, props, clientRoot, projectRoot: projectRootArg, requestPathname }) {
   if (!componentPath) {
     throw new Error('Missing componentPath in render request.');
   }
@@ -334,12 +334,29 @@ export default entry.contents;
     throw new Error('Component does not export a default function.');
   }
 
-  const element = React.createElement(Component, props);
-  const html = ReactDOMServer.renderToString(element);
-  const styles = styleRegistry.list();
-  const headElements = headRegistry.list();
+  // Make the request path visible to hooks like usePathname() during SSR.
+  // Cleared in `finally` so a request with no pathname can't inherit the
+  // previous request's value through the global.
+  const previousPathname = globalThis.__PYXLE_CURRENT_PATHNAME__;
+  if (typeof requestPathname === 'string') {
+    globalThis.__PYXLE_CURRENT_PATHNAME__ = requestPathname;
+  } else {
+    delete globalThis.__PYXLE_CURRENT_PATHNAME__;
+  }
 
-  return { html, styles, headElements };
+  try {
+    const element = React.createElement(Component, props);
+    const html = ReactDOMServer.renderToString(element);
+    const styles = styleRegistry.list();
+    const headElements = headRegistry.list();
+    return { html, styles, headElements };
+  } finally {
+    if (previousPathname === undefined) {
+      delete globalThis.__PYXLE_CURRENT_PATHNAME__;
+    } else {
+      globalThis.__PYXLE_CURRENT_PATHNAME__ = previousPathname;
+    }
+  }
 }
 
 // --- Helpers (shared with render_component.mjs) ---

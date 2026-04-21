@@ -1584,16 +1584,16 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               if (!src) {
                 return;
               }
-              
+
               // Check if script already exists
               const existing = document.querySelector(`script[src="${src}"]`);
               if (existing) {
                 return;
               }
-              
+
               const script = document.createElement('script');
               script.src = src;
-              
+
               if (scriptMeta.async) {
                 script.async = true;
               }
@@ -1605,7 +1605,23 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               } else if (scriptMeta.noModule) {
                 script.setAttribute('nomodule', '');
               }
-              
+
+              // Mark load/failure state so the <Script> React component can
+              // synchronise with bootstrap-loaded scripts.  Without this, a
+              // component that renders the same src after bootstrap
+              // finishes would attach load listeners to an already-loaded
+              // tag and its onLoad callback would never fire.
+              script.addEventListener(
+                'load',
+                function () { script.setAttribute('data-pyxle-script-loaded', 'true'); },
+                { once: true },
+              );
+              script.addEventListener(
+                'error',
+                function () { script.setAttribute('data-pyxle-script-failed', 'true'); },
+                { once: true },
+              );
+
               document.head.appendChild(script);
             }
 
@@ -1945,18 +1961,140 @@ def _render_script_component() -> str:
             """
             /**
              * Framework-owned Script component for Pyxle.
+             *
+             * Strategies
+             *   beforeInteractive  Statically extracted + injected in SSR <head>.
+             *                      A dynamically-rendered instance can't honour
+             *                      that contract (page already interactive), so
+             *                      we warn and degrade to afterInteractive.
+             *   afterInteractive   Loads on mount after hydration (default).
+             *   lazyOnload         Loads on idle (requestIdleCallback / setTimeout).
+             *
+             * All loads are deduplicated by src across component instances AND
+             * the framework's bootstrap loader — exactly one request per URL.
              */
+
+            import React from 'react';
+
+            const LOADED_ATTR = 'data-pyxle-script-loaded';
+            const FAILED_ATTR = 'data-pyxle-script-failed';
+            const scriptPromises = new Map();
+
+            function ensureScriptLoaded(src, options) {
+              const cached = scriptPromises.get(src);
+              if (cached) return cached;
+
+              const escape = (typeof CSS !== 'undefined' && CSS.escape) || ((s) => s);
+              const existing = document.querySelector('script[src="' + escape(src) + '"]');
+              if (existing) {
+                const promise = new Promise((resolve, reject) => {
+                  if (existing.getAttribute(LOADED_ATTR) === 'true') {
+                    resolve();
+                  } else if (existing.getAttribute(FAILED_ATTR) === 'true') {
+                    reject(new Error('Script previously failed to load: ' + src));
+                  } else {
+                    existing.addEventListener('load', () => resolve(), { once: true });
+                    existing.addEventListener('error', () => reject(new Error('Failed to load script: ' + src)), { once: true });
+                  }
+                });
+                scriptPromises.set(src, promise);
+                return promise;
+              }
+
+              const script = document.createElement('script');
+              script.src = src;
+              if (options.async) script.async = true;
+              if (options.defer) script.defer = true;
+              if (options.module) script.type = 'module';
+              if (options.noModule) script.setAttribute('nomodule', '');
+              if (options.crossOrigin) script.crossOrigin = options.crossOrigin;
+              if (options.integrity) script.integrity = options.integrity;
+              if (options.referrerPolicy) script.referrerPolicy = options.referrerPolicy;
+
+              const promise = new Promise((resolve, reject) => {
+                script.addEventListener('load', () => {
+                  script.setAttribute(LOADED_ATTR, 'true');
+                  resolve();
+                }, { once: true });
+                script.addEventListener('error', () => {
+                  script.setAttribute(FAILED_ATTR, 'true');
+                  reject(new Error('Failed to load script: ' + src));
+                }, { once: true });
+              });
+
+              document.head.appendChild(script);
+              scriptPromises.set(src, promise);
+              return promise;
+            }
+
             export function Script({
               src,
               strategy = 'afterInteractive',
-              async = false,
-              defer = false,
-              module = false,
-              noModule = false,
+              async: asyncProp,
+              defer,
+              module,
+              noModule,
               onLoad,
               onError,
-              ...props
+              children,
+              ...attrs
             }) {
+              if (typeof window === 'undefined') return null;
+
+              React.useEffect(() => {
+                if (!src) {
+                  if (typeof children !== 'string' || children.length === 0) return undefined;
+                  const script = document.createElement('script');
+                  script.textContent = children;
+                  if (module) script.type = 'module';
+                  document.head.appendChild(script);
+                  if (onLoad) onLoad();
+                  return () => {
+                    if (script.parentNode) script.parentNode.removeChild(script);
+                  };
+                }
+
+                let effectiveStrategy = strategy;
+                if (effectiveStrategy === 'beforeInteractive') {
+                  console.warn(
+                    '[Pyxle Script] strategy="beforeInteractive" requires the ' +
+                    '<Script> to be statically present in a .pyxl file at build ' +
+                    'time. Falling back to "afterInteractive" for dynamically ' +
+                    'rendered src: ' + src
+                  );
+                  effectiveStrategy = 'afterInteractive';
+                }
+
+                const load = () => {
+                  ensureScriptLoaded(src, {
+                    async: asyncProp,
+                    defer,
+                    module,
+                    noModule,
+                    crossOrigin: attrs.crossOrigin,
+                    integrity: attrs.integrity,
+                    referrerPolicy: attrs.referrerPolicy,
+                  }).then(
+                    () => { if (onLoad) onLoad(); },
+                    (err) => { if (onError) onError(err); }
+                  );
+                };
+
+                if (effectiveStrategy === 'lazyOnload') {
+                  if (typeof requestIdleCallback === 'function') {
+                    const handle = requestIdleCallback(load);
+                    return () => {
+                      if (typeof cancelIdleCallback === 'function') cancelIdleCallback(handle);
+                    };
+                  }
+                  const handle = setTimeout(load, 200);
+                  return () => clearTimeout(handle);
+                }
+
+                load();
+                return undefined;
+              }, [src, strategy, module, noModule]);
+
               return null;
             }
 
@@ -1971,63 +2109,130 @@ def _render_image_component() -> str:
     return (
         dedent(
             """
+            /**
+             * <Image> — thin wrapper over the native <img> with:
+             *   1. Native lazy-loading via the standard `loading` attribute.
+             *   2. Blur-up placeholder (`placeholder="blur"` + blurDataURL).
+             *   3. onLoad / onError callbacks + `data-pyxle-image-state`
+             *      attribute exposing loading | loaded | error.
+             *   4. Optional `fallbackSrc` that transparently replaces a
+             *      broken URL before surfacing the error.
+             *
+             * Unspecified props pass straight through, so `srcSet`, `sizes`,
+             * `className`, `style`, `onClick`, etc. all work as expected.
+             */
+
             import React from 'react';
 
-            export const Image = React.forwardRef(
-              (
-                {
-                  src,
-                  width,
-                  height,
-                  alt = '',
-                  priority = false,
-                  lazy = true,
-                  className,
-                  style,
-                  onLoad,
-                  onError,
-                  ...props
-                },
-                ref
-              ) => {
-                const aspectRatio = width && height ? (width / height).toFixed(4) : undefined;
+            const STATE_LOADING = 'loading';
+            const STATE_LOADED = 'loaded';
+            const STATE_ERROR = 'error';
 
-                const containerStyle = {
-                  position: 'relative',
-                  width: '100%',
-                  paddingBottom: aspectRatio ? `${(height / width) * 100}%` : undefined,
-                  ...style,
-                };
+            export const Image = React.forwardRef(function PyxleImage(
+              {
+                src,
+                alt = '',
+                width,
+                height,
+                priority = false,
+                lazy = true,
+                placeholder = 'empty',
+                blurDataURL,
+                placeholderColor = '#e5e5e5',
+                fallbackSrc,
+                onLoad,
+                onError,
+                className,
+                style,
+                ...props
+              },
+              forwardedRef
+            ) {
+              const [state, setState] = React.useState(STATE_LOADING);
+              const [currentSrc, setCurrentSrc] = React.useState(src);
+              const internalRef = React.useRef(null);
+              const setRef = (node) => {
+                internalRef.current = node;
+                if (typeof forwardedRef === 'function') forwardedRef(node);
+                else if (forwardedRef) forwardedRef.current = node;
+              };
 
-                const imgStyle = {
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  width: '100%',
-                  height: '100%',
-                  objectFit: 'cover',
-                };
+              React.useEffect(() => {
+                setState(STATE_LOADING);
+                setCurrentSrc(src);
+              }, [src]);
 
-                const loading = priority ? 'eager' : lazy ? 'lazy' : undefined;
+              // Cached images skip the load event — detect via `.complete`
+              // and sync state manually so onLoad still fires.  Symmetrically,
+              // a broken SSR-rendered src may have finished its failed fetch
+              // before React hydrated (so the native `error` event fired
+              // without a synthetic listener attached): detect that via
+              // `complete && naturalWidth === 0` and drive the fallback path.
+              React.useEffect(() => {
+                const el = internalRef.current;
+                if (!el || !el.complete || state !== STATE_LOADING) return;
+                if (el.naturalWidth > 0) {
+                  setState(STATE_LOADED);
+                  if (onLoad) onLoad({ nativeEvent: null, target: el, fromCache: true });
+                } else {
+                  if (fallbackSrc && currentSrc !== fallbackSrc) {
+                    setCurrentSrc(fallbackSrc);
+                  } else {
+                    setState(STATE_ERROR);
+                    if (onError) onError({ nativeEvent: null, target: el });
+                  }
+                }
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+              }, [currentSrc]);
 
-                return (
-                  <div style={containerStyle} className={className}>
-                    <img
-                      ref={ref}
-                      src={src}
-                      alt={alt}
-                      width={width}
-                      height={height}
-                      loading={loading}
-                      style={imgStyle}
-                      onLoad={onLoad}
-                      onError={onError}
-                      {...props}
-                    />
-                  </div>
-                );
-              }
-            );
+              const handleLoad = (event) => {
+                setState(STATE_LOADED);
+                if (onLoad) onLoad(event);
+              };
+
+              const handleError = (event) => {
+                if (fallbackSrc && currentSrc !== fallbackSrc) {
+                  setCurrentSrc(fallbackSrc);
+                  return;
+                }
+                setState(STATE_ERROR);
+                if (onError) onError(event);
+              };
+
+              const showPlaceholder = placeholder === 'blur' && state === STATE_LOADING;
+              const mergedStyle = {
+                ...(showPlaceholder
+                  ? {
+                      backgroundColor: blurDataURL ? undefined : placeholderColor,
+                      backgroundImage: blurDataURL ? `url("${blurDataURL}")` : undefined,
+                      backgroundSize: 'cover',
+                      backgroundPosition: 'center',
+                      backgroundRepeat: 'no-repeat',
+                      filter: blurDataURL ? 'blur(20px)' : undefined,
+                    }
+                  : {}),
+                transition: placeholder === 'blur' ? 'filter 250ms ease-out' : undefined,
+                ...style,
+              };
+
+              return (
+                <img
+                  ref={setRef}
+                  src={currentSrc}
+                  alt={alt}
+                  width={width}
+                  height={height}
+                  loading={priority ? 'eager' : lazy ? 'lazy' : 'eager'}
+                  decoding={priority ? 'sync' : 'async'}
+                  onLoad={handleLoad}
+                  onError={handleError}
+                  className={className}
+                  style={mergedStyle}
+                  data-pyxle-image-state={state}
+                  {...props}
+                />
+              );
+            });
 
             Image.displayName = 'PyxleImage';
             export default Image;
@@ -2044,31 +2249,101 @@ def _render_head_component() -> str:
             import React from 'react';
             import { renderToStaticMarkup } from 'react-dom/server';
 
+            /**
+             * <Head> — declare elements that belong in the document <head>.
+             *
+             *   • SSR    — registers children with the framework's head
+             *              registry so they land in the initial HTML.
+             *   • Client — adopts the equivalent SSR-rendered elements on
+             *              mount (no duplication), applies fresh ones on
+             *              state-driven updates, and cleans up on unmount
+             *              (restoring the prior <title>).
+             */
+
+            const OWNER_ATTR = 'data-pyxle-head-client';
+            const KEY_ATTRS = ['name', 'property', 'rel', 'href', 'src', 'charset', 'http-equiv'];
+
+            function findEquivalentHeadElement(target) {
+              const tag = target.tagName.toLowerCase();
+              const keyAttr = KEY_ATTRS.find((a) => target.hasAttribute(a));
+              if (!keyAttr) return null;
+              const keyValue = target.getAttribute(keyAttr);
+              const escape = (typeof CSS !== 'undefined' && CSS.escape) || ((s) => s);
+              const selector = tag + '[' + keyAttr + '="' + escape(keyValue) + '"]:not([' + OWNER_ATTR + '])';
+              try {
+                return document.head.querySelector(selector);
+              } catch (_err) {
+                return null;
+              }
+            }
+
+            function applyHeadMarkup(markup) {
+              if (!markup) return { nodes: [], previousTitle: null };
+              const template = document.createElement('template');
+              template.innerHTML = markup;
+              const parsed = Array.from(template.content.childNodes).filter(
+                (n) => n.nodeType === 1
+              );
+              const nodes = [];
+              let previousTitle = null;
+              for (const declared of parsed) {
+                if (declared.tagName === 'TITLE') {
+                  if (previousTitle === null) previousTitle = document.title;
+                  document.title = declared.textContent || '';
+                  continue;
+                }
+                const existing = findEquivalentHeadElement(declared);
+                if (existing) {
+                  existing.setAttribute(OWNER_ATTR, '');
+                  nodes.push(existing);
+                } else {
+                  declared.setAttribute(OWNER_ATTR, '');
+                  document.head.appendChild(declared);
+                  nodes.push(declared);
+                }
+              }
+              return { nodes, previousTitle };
+            }
+
             export const Head = React.forwardRef(({ children }, ref) => {
-              // Server-side: Extract head elements and register them
+              // SSR: register with the framework registry; renders nothing.
               if (typeof window === 'undefined') {
                 if (typeof globalThis.__PYXLE_HEAD_REGISTRY__ !== 'undefined') {
                   try {
-                    // Render children to static markup for extraction
-                    const headMarkup = renderToStaticMarkup(React.createElement(React.Fragment, null, children));
+                    const headMarkup = renderToStaticMarkup(
+                      React.createElement(React.Fragment, null, children)
+                    );
                     globalThis.__PYXLE_HEAD_REGISTRY__.register(headMarkup);
                   } catch (error) {
-                    // If rendering fails, skip registration
-                    console.error('Failed to extract head elements:', error);
+                    console.error('[Pyxle Head] SSR extraction failed:', error);
                   }
                 }
+                return null;
               }
 
-              // Client-side: Update the document head during navigation
-              React.useEffect(() => {
-                if (typeof window === 'undefined') return;
-                
-                // Client-side head updates during navigation
-                // This will be implemented in a future phase
-                // For now, SSR handles the initial head elements
-              }, [children]);
+              // Client: render children to a static string so the effect's
+              // dependency is stable across renders with identical children.
+              let markup = '';
+              try {
+                markup = renderToStaticMarkup(
+                  React.createElement(React.Fragment, null, children)
+                );
+              } catch (error) {
+                console.error('[Pyxle Head] client render failed:', error);
+              }
 
-              // Return null - head elements are rendered elsewhere
+              React.useEffect(() => {
+                const { nodes, previousTitle } = applyHeadMarkup(markup);
+                return () => {
+                  for (const node of nodes) {
+                    if (node.parentNode) node.parentNode.removeChild(node);
+                  }
+                  if (previousTitle !== null) {
+                    document.title = previousTitle;
+                  }
+                };
+              }, [markup]);
+
               return null;
             });
 
@@ -2115,13 +2390,22 @@ def _render_script_component_types() -> str:
             import type React from 'react';
 
             export interface ScriptProps {
-              src: string;
+              /** URL of the external script. Omit to use `children` as inline code. */
+              src?: string;
+              /** When to load the script. Defaults to 'afterInteractive'. */
               strategy?: 'beforeInteractive' | 'afterInteractive' | 'lazyOnload';
               async?: boolean;
               defer?: boolean;
               module?: boolean;
               noModule?: boolean;
+              crossOrigin?: 'anonymous' | 'use-credentials' | '';
+              integrity?: string;
+              referrerPolicy?: React.HTMLAttributeReferrerPolicy;
+              /** Inline script source (used when `src` is omitted). */
+              children?: string;
+              /** Fires once the script finishes loading. */
               onLoad?: () => void;
+              /** Fires if loading fails. */
               onError?: (error: Error) => void;
             }
 
@@ -2139,13 +2423,35 @@ def _render_image_component_types() -> str:
             """
             import type React from 'react';
 
-            export interface ImageProps extends React.ImgHTMLAttributes<HTMLImageElement> {
+            export type PyxleImageState = 'loading' | 'loaded' | 'error';
+
+            export interface PyxleImageLoadEvent {
+              nativeEvent: Event | null;
+              target: HTMLImageElement;
+              fromCache: boolean;
+            }
+
+            export interface ImageProps extends Omit<React.ImgHTMLAttributes<HTMLImageElement>, 'onLoad' | 'onError' | 'placeholder'> {
               src: string;
-              width?: number;
-              height?: number;
+              width?: number | string;
+              height?: number | string;
               alt?: string;
+              /** Load eagerly (`loading="eager"` + `decoding="sync"`). */
               priority?: boolean;
+              /** Explicit lazy-load. Ignored when `priority` is true. Default: true. */
               lazy?: boolean;
+              /** `"blur"` renders a background placeholder until the image loads. */
+              placeholder?: 'empty' | 'blur';
+              /** Data URL (or any valid url()) used as the blur placeholder. */
+              blurDataURL?: string;
+              /** Solid colour used when `placeholder="blur"` but no blurDataURL is provided. */
+              placeholderColor?: string;
+              /** If set, replaces `src` transparently when the original fails. */
+              fallbackSrc?: string;
+              /** Fires once on load (including the synthetic cache-hit path). */
+              onLoad?: (event: PyxleImageLoadEvent | React.SyntheticEvent<HTMLImageElement>) => void;
+              /** Fires once on error (after `fallbackSrc` has been tried, if set). */
+              onError?: (event: React.SyntheticEvent<HTMLImageElement>) => void;
             }
 
             export declare const Image: React.ForwardRefExoticComponent<ImageProps & React.RefAttributes<HTMLImageElement>>;
@@ -2210,6 +2516,10 @@ def _render_use_action_component() -> str:
               if (!page) {
                 if (typeof window !== 'undefined') {
                   page = window.location.pathname;
+                } else if (typeof globalThis.__PYXLE_CURRENT_PATHNAME__ === 'string') {
+                  // SSR: use the framework-injected request path so the action
+                  // URL matches what the client will resolve at hydration.
+                  page = globalThis.__PYXLE_CURRENT_PATHNAME__;
                 } else {
                   page = '/';
                 }
@@ -2309,6 +2619,10 @@ def _render_form_component() -> str:
               if (!page) {
                 if (typeof window !== 'undefined') {
                   page = window.location.pathname;
+                } else if (typeof globalThis.__PYXLE_CURRENT_PATHNAME__ === 'string') {
+                  // SSR: use the framework-injected request path so the action
+                  // URL matches what the client will resolve at hydration.
+                  page = globalThis.__PYXLE_CURRENT_PATHNAME__;
                 } else {
                   page = '/';
                 }
@@ -2421,14 +2735,26 @@ def _render_use_pathname_component() -> str:
             /**
              * usePathname — reactively track the current URL pathname.
              *
-             * Returns window.location.pathname on the client.  Re-renders
-             * the component whenever Pyxle performs a client-side navigation.
-             * During SSR returns '/'.
+             * During SSR it reads the request path from
+             * globalThis.__PYXLE_CURRENT_PATHNAME__ (set by the SSR worker
+             * before rendering) so the server and client agree on hydration.
+             * Falls back to '/' only when the global is absent.
+             *
+             * Re-renders the component whenever Pyxle performs a client-side
+             * navigation or the browser fires a popstate event.
              */
+            function getInitialPathname() {
+              if (typeof window !== 'undefined') {
+                return window.location.pathname;
+              }
+              if (typeof globalThis.__PYXLE_CURRENT_PATHNAME__ === 'string') {
+                return globalThis.__PYXLE_CURRENT_PATHNAME__;
+              }
+              return '/';
+            }
+
             export function usePathname() {
-              const [pathname, setPathname] = useState(
-                typeof window !== 'undefined' ? window.location.pathname : '/'
-              );
+              const [pathname, setPathname] = useState(getInitialPathname);
 
               useEffect(() => {
                 // Sync on mount in case the SSR value differs.

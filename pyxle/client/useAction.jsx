@@ -25,6 +25,11 @@ function resolveActionUrl(actionName, pagePath) {
   if (!page) {
     if (typeof window !== 'undefined') {
       page = window.location.pathname;
+    } else if (typeof globalThis.__PYXLE_CURRENT_PATHNAME__ === 'string') {
+      // SSR: use the request path the framework injected before rendering,
+      // so the server and client agree on the form's action URL and
+      // React doesn't fire a hydration mismatch warning.
+      page = globalThis.__PYXLE_CURRENT_PATHNAME__;
     } else {
       page = '/';
     }

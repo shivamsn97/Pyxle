@@ -492,7 +492,11 @@ async def _create_page_artifacts(
     )
 
     component_props = _compose_component_props(loader_props, layout_data)
-    render_result = await renderer.render(page.client_module_path, component_props)
+    render_result = await renderer.render(
+        page.client_module_path,
+        component_props,
+        request_pathname=request.url.path,
+    )
     body_html = render_result.html
     inline_styles = render_result.inline_styles
     
@@ -562,6 +566,7 @@ async def _try_error_boundary(
         render_result = await renderer.render(
             boundary_page.client_module_path,
             {"error": error_context},
+            request_pathname=request.url.path,
         )
         script_nonce = secrets.token_urlsafe(24)
         head_elements = boundary_page.head_elements

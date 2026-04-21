@@ -88,6 +88,51 @@ async def test_renderer_deduplicates_concurrent_factory_invocations(tmp_path: Pa
 
 
 @pytest.mark.anyio
+async def test_renderer_forwards_request_pathname_to_new_factories(tmp_path: Path) -> None:
+    """Render callables declaring ``request_pathname`` receive it."""
+    seen: list[str | None] = []
+
+    async def factory(path: Path):
+        async def render(props, *, request_pathname=None):
+            seen.append(request_pathname)
+            return RenderResult(html="ok")
+
+        return render
+
+    renderer = ComponentRenderer(factory=factory)
+    component = tmp_path / "c.jsx"
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    await renderer.render(component, {}, request_pathname="/dashboard")
+    await renderer.render(component, {}, request_pathname="/settings")
+    await renderer.render(component, {})  # no pathname given
+
+    assert seen == ["/dashboard", "/settings", None]
+
+
+@pytest.mark.anyio
+async def test_renderer_omits_pathname_for_legacy_factories(tmp_path: Path) -> None:
+    """Callables without ``request_pathname`` still work (back-compat)."""
+    call_count = 0
+
+    async def factory(path: Path):
+        async def render(props):   # old signature, no request_pathname
+            nonlocal call_count
+            call_count += 1
+            return RenderResult(html="legacy")
+
+        return render
+
+    renderer = ComponentRenderer(factory=factory)
+    component = tmp_path / "legacy.jsx"
+    component.write_text("export default () => null;\n", encoding="utf-8")
+
+    result = await renderer.render(component, {}, request_pathname="/foo")
+    assert result.html == "legacy"
+    assert call_count == 1
+
+
+@pytest.mark.anyio
 async def test_renderer_supports_sync_factory(tmp_path: Path) -> None:
     component = tmp_path / "view.jsx"
     component.write_text("export default () => null;\n", encoding="utf-8")
@@ -199,7 +244,12 @@ async def test_default_factory_invokes_runtime(monkeypatch: pytest.MonkeyPatch, 
         def __init__(self, path: Path) -> None:
             self.path = path
 
-        def render(self, props: dict[str, object]) -> str:
+        def render(
+            self,
+            props: dict[str, object],
+            *,
+            request_pathname: str | None = None,
+        ) -> RenderResult:
             return RenderResult(html=f"rendered:{props['value']}:{self.path.name}")
 
     monkeypatch.setattr(renderer_module, "_NodeComponentRuntime", FakeRuntime)

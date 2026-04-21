@@ -22,7 +22,7 @@ Django and Flask are backend frameworks that render templates. Pyxle is a full-s
 
 ### Is Pyxle production-ready?
 
-Pyxle is in **beta** (version 0.2.3). The core features are implemented and tested (1100+ tests, 95%+ coverage), but the API may change before 1.0. Use it for new projects and experiments, but be prepared for breaking changes.
+Pyxle is in **beta** (version 0.2.4). The core features are implemented and tested (1100+ tests, 95%+ coverage), but the API may change before 1.0. Use it for new projects and experiments, but be prepared for breaking changes.
 
 ### What Python version do I need?
 

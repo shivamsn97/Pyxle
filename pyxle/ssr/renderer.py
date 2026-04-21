@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import shutil
 import subprocess
@@ -35,7 +36,12 @@ class RenderResult:
 
 
 RenderOutput = RenderResult | str
-_RenderCallable = Callable[[Dict[str, Any]], Awaitable[RenderOutput] | RenderOutput]
+# Render callables receive the serialized props dict and may also accept
+# a ``request_pathname`` keyword argument — SSR forwards it so hooks such
+# as ``usePathname`` return the request's real path instead of a fallback.
+# Callables that only accept ``props`` are still supported for backward
+# compatibility (see ``_invoke_render``).
+_RenderCallable = Callable[..., Awaitable[RenderOutput] | RenderOutput]
 _FactoryReturn = Awaitable[_RenderCallable] | _RenderCallable
 _RenderFactory = Callable[[Path], _FactoryReturn]
 
@@ -61,8 +67,20 @@ class ComponentRenderer:
         self._lock = asyncio.Lock()
         self._generation = 0
 
-    async def render(self, component_path: Path, props: Dict[str, Any]) -> RenderResult:
-        """Render ``component_path`` with the provided props."""
+    async def render(
+        self,
+        component_path: Path,
+        props: Dict[str, Any],
+        *,
+        request_pathname: str | None = None,
+    ) -> RenderResult:
+        """Render ``component_path`` with the provided props.
+
+        ``request_pathname`` is forwarded to the SSR runtime and exposed
+        to component code via ``globalThis.__PYXLE_CURRENT_PATHNAME__``
+        during rendering, so hooks like ``usePathname`` return the
+        request's actual path and hydrate without mismatches.
+        """
 
         resolved = component_path.resolve()
         cached = self._cache.get(resolved)
@@ -76,9 +94,9 @@ class ComponentRenderer:
                     self._cache[resolved] = cached
 
         _, render_fn = cached
-        result = render_fn(props)
-        resolved = await _ensure_awaitable(result)
-        return _normalize_render_output(resolved)
+        result = _invoke_render(render_fn, props, request_pathname=request_pathname)
+        resolved_result = await _ensure_awaitable(result)
+        return _normalize_render_output(resolved_result)
 
     def clear(self) -> None:
         """Drop all cached component renderers."""
@@ -87,11 +105,54 @@ class ComponentRenderer:
         self._cache.clear()
 
 
+def _invoke_render(
+    render_fn: _RenderCallable,
+    props: Dict[str, Any],
+    *,
+    request_pathname: str | None,
+) -> Any:
+    """Call *render_fn* with the right signature for its parameters.
+
+    Render callables returned by the built-in factories accept an optional
+    ``request_pathname`` keyword argument.  Third-party callables (and
+    tests written before this parameter existed) may accept only ``props``.
+    Introspection lets us preserve both — we check the signature once per
+    call and pass the keyword only when accepted.
+    """
+    try:
+        sig = inspect.signature(render_fn)
+    except (TypeError, ValueError):
+        # Builtins / C-extension callables — just pass props positionally.
+        return render_fn(props)
+
+    accepts_pathname = False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            accepts_pathname = True
+            break
+        if param.name == "request_pathname" and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ):
+            accepts_pathname = True
+            break
+
+    if accepts_pathname:
+        return render_fn(props, request_pathname=request_pathname)
+    return render_fn(props)
+
+
 def _default_factory(component_path: Path) -> _RenderCallable:
     runtime = _NodeComponentRuntime(component_path)
 
-    async def _render(props: Dict[str, Any]) -> RenderResult:
-        return await asyncio.to_thread(runtime.render, props)
+    async def _render(
+        props: Dict[str, Any],
+        *,
+        request_pathname: str | None = None,
+    ) -> RenderResult:
+        return await asyncio.to_thread(
+            runtime.render, props, request_pathname=request_pathname
+        )
 
     return _render
 
@@ -103,7 +164,12 @@ class _NodeComponentRuntime:
         self._node_executable = _resolve_node_executable()
         self._runtime_script = _resolve_runtime_script()
 
-    def render(self, props: Dict[str, Any]) -> RenderResult:
+    def render(
+        self,
+        props: Dict[str, Any],
+        *,
+        request_pathname: str | None = None,
+    ) -> RenderResult:
         try:
             serialized_props = json.dumps(props, ensure_ascii=False, separators=(",", ":"))
         except (TypeError, ValueError) as exc:
@@ -123,6 +189,12 @@ class _NodeComponentRuntime:
         from pyxle.ssr.worker_pool import _build_node_env
 
         env = _build_node_env(self._project_root)
+        # The Node runtime reads the pathname from this env var and sets
+        # globalThis.__PYXLE_CURRENT_PATHNAME__ before invoking the page
+        # component. Picking an env var (rather than yet another argv slot)
+        # keeps the subprocess command signature stable.
+        if request_pathname is not None:
+            env["PYXLE_REQUEST_PATHNAME"] = request_pathname
 
         try:
             process = subprocess.run(  # noqa: S603 - controlled command invocation
@@ -272,7 +344,11 @@ def pool_render_factory(pool: Any) -> _RenderFactory:
     from pyxle.ssr.worker_pool import WorkerPoolError
 
     def factory(component_path: Path) -> _RenderCallable:
-        async def _render(props: Dict[str, Any]) -> RenderResult:
+        async def _render(
+            props: Dict[str, Any],
+            *,
+            request_pathname: str | None = None,
+        ) -> RenderResult:
             try:
                 # Validate JSON-serializability without a redundant round-trip.
                 json.dumps(props, ensure_ascii=False, separators=(",", ":"))
@@ -282,7 +358,9 @@ def pool_render_factory(pool: Any) -> _RenderFactory:
                 ) from exc
 
             try:
-                result = await pool.render(component_path, props)
+                result = await pool.render(
+                    component_path, props, request_pathname=request_pathname
+                )
             except WorkerPoolError as exc:
                 raise ComponentRenderError(str(exc)) from exc
 

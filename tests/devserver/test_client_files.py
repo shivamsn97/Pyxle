@@ -364,6 +364,191 @@ def test_use_pathname_component_is_ssr_safe() -> None:
     assert "pyxle:routechange" in source
 
 
+def test_use_pathname_reads_ssr_pathname_global() -> None:
+    """The hook reads globalThis.__PYXLE_CURRENT_PATHNAME__ during SSR.
+
+    Without this the hook returns '/' on the server and hydration mismatches
+    on every active-link-highlighting layout.  The SSR worker sets the global
+    before rendering — the hook must consume it.
+    """
+    source = _render_use_pathname_component()
+    # The executable expression (not just a docstring mention) must be present.
+    assert "typeof globalThis.__PYXLE_CURRENT_PATHNAME__" in source
+    # And the fallback to '/' is still there for tests / direct renders
+    # that bypass the SSR worker.
+    assert "return '/'" in source
+
+
+def test_head_component_ssr_branch_registers_children() -> None:
+    """SSR branch still registers children with __PYXLE_HEAD_REGISTRY__."""
+    from pyxle.devserver.client_files import _render_head_component
+    source = _render_head_component()
+    assert "typeof window === 'undefined'" in source
+    assert "__PYXLE_HEAD_REGISTRY__" in source
+    assert "renderToStaticMarkup" in source
+
+
+def test_image_component_exposes_loading_state_and_callbacks() -> None:
+    """Image must track state, fire onLoad/onError, and expose data attr."""
+    from pyxle.devserver.client_files import _render_image_component
+    source = _render_image_component()
+
+    # Loading state and the three phases.
+    assert "STATE_LOADING" in source
+    assert "STATE_LOADED" in source
+    assert "STATE_ERROR" in source
+    # Exposed to CSS / selectors for external styling & tests.
+    assert "data-pyxle-image-state" in source
+
+    # onLoad / onError hooks wired up (not just passed through).
+    assert "handleLoad" in source
+    assert "handleError" in source
+
+    # Cache-hit path — images already loaded don't fire native 'load'; we
+    # check .complete and synthesize the event.
+    assert ".complete" in source
+    assert "fromCache" in source
+
+
+def test_image_component_supports_blur_placeholder_and_fallback() -> None:
+    """Image supports blur-up placeholder and automatic fallback on error."""
+    from pyxle.devserver.client_files import _render_image_component
+    source = _render_image_component()
+
+    # Blur placeholder with blurDataURL or solid color fallback.
+    assert "placeholder" in source
+    assert "blurDataURL" in source
+    assert "placeholderColor" in source
+    assert "filter: blurDataURL ? 'blur(20px)' : undefined" in source
+
+    # fallbackSrc replaces src once on error before surfacing it.
+    assert "fallbackSrc" in source
+
+
+def test_image_component_detects_ssr_hydration_error_via_complete() -> None:
+    """Image must drive the fallback path when the browser finished a failed
+    SSR-initiated fetch before React hydration attached its onError listener.
+
+    The post-mount useEffect checks `complete && naturalWidth === 0` (image
+    has terminated fetching but has no pixels) and swaps in `fallbackSrc`
+    just like a live error would — otherwise a broken SSR-rendered <img>
+    would strand in the loading state forever.
+    """
+    from pyxle.devserver.client_files import _render_image_component
+    source = _render_image_component()
+
+    # Positive branch (cache hit) stays.
+    assert "el.naturalWidth > 0" in source
+    # Negative branch — terminal failure detected post-hydration.
+    assert "fallbackSrc && currentSrc !== fallbackSrc" in source
+    # The effect must react to currentSrc (re-run after fallback swap).
+    assert "}, [currentSrc]);" in source
+
+
+def test_image_component_types_model_new_api() -> None:
+    """TypeScript definitions expose placeholder/blurDataURL/fallbackSrc/state."""
+    from pyxle.devserver.client_files import _render_image_component_types
+    types = _render_image_component_types()
+    assert "PyxleImageState" in types
+    assert "placeholder?:" in types
+    assert "blurDataURL?:" in types
+    assert "fallbackSrc?:" in types
+    assert "onLoad?:" in types
+    assert "onError?:" in types
+
+
+def test_resolve_action_url_reads_ssr_pathname_global() -> None:
+    """useAction and Form must resolve the action URL against the real
+    request path during SSR — otherwise the form emits a server URL
+    rooted at /api/__actions/index/... while the client computes
+    /api/__actions/<page>/..., causing a hydration mismatch warning."""
+    from pyxle.devserver.client_files import (
+        _render_use_action_component,
+        _render_form_component,
+    )
+    for source in (_render_use_action_component(), _render_form_component()):
+        assert "__PYXLE_CURRENT_PATHNAME__" in source, (
+            "resolveActionUrl must read the framework's SSR pathname global"
+        )
+        # The window-branch still comes first — we only hit the SSR branch
+        # when there's no window (true SSR path).
+        assert "typeof window !== 'undefined'" in source
+
+
+def test_script_component_is_real_runtime_not_stub() -> None:
+    """Script must actually load scripts — not just return null."""
+    from pyxle.devserver.client_files import _render_script_component
+    source = _render_script_component()
+
+    # No longer a stub — the component should have real implementation.
+    assert "ensureScriptLoaded" in source
+    assert "document.head.appendChild" in source
+
+    # All three strategies must be handled explicitly.
+    assert "lazyOnload" in source
+    assert "afterInteractive" in source
+    assert "beforeInteractive" in source
+
+    # Lazy strategy must prefer requestIdleCallback, fall back to setTimeout.
+    assert "requestIdleCallback" in source
+    assert "setTimeout" in source
+
+    # Dedup + load-state tracking.
+    assert "scriptPromises" in source
+    assert "data-pyxle-script-loaded" in source
+
+    # onLoad / onError must both be hooked up.
+    assert "onLoad" in source
+    assert "onError" in source
+
+
+def test_script_component_inline_children_supported() -> None:
+    """<Script>inline code</Script> without src must insert an inline tag."""
+    from pyxle.devserver.client_files import _render_script_component
+    source = _render_script_component()
+    # The inline branch appears when src is falsy.
+    assert "if (!src)" in source
+    assert "textContent = children" in source
+
+
+def test_script_component_types_include_optional_src_and_children() -> None:
+    """TypeScript definitions match the new runtime capability."""
+    from pyxle.devserver.client_files import _render_script_component_types
+    types = _render_script_component_types()
+    # src must be optional so inline-only usage type-checks.
+    assert "src?: string" in types
+    # children is accepted for inline script content.
+    assert "children?: string" in types
+    # Standard integrity / security props are modelled.
+    assert "integrity" in types
+    assert "crossOrigin" in types
+
+
+def test_head_component_client_branch_applies_and_cleans_up() -> None:
+    """Client branch must update DOM on mount/update AND clean up on unmount.
+
+    Previously the client useEffect was a stub, so state-driven head changes
+    never reached the DOM. This test pins the new behaviour in place.
+    """
+    from pyxle.devserver.client_files import _render_head_component
+    source = _render_head_component()
+
+    # The helper that actually applies markup must exist and handle both
+    # <title> (document.title) and other elements (document.head).
+    assert "applyHeadMarkup" in source
+    assert "document.title" in source
+    assert "document.head" in source
+
+    # Cleanup function (return-value of useEffect) must remove what was
+    # inserted and restore the previous title — no leaks across renders.
+    assert "parentNode.removeChild" in source
+    assert "previousTitle" in source
+
+    # Adoption of SSR-rendered nodes is what keeps hydration duplicate-free.
+    assert "findEquivalentHeadElement" in source
+    assert "data-pyxle-head-client" in source
+
+
 def test_use_pathname_component_types() -> None:
     """Type definition declares usePathname returning a string."""
     types = _render_use_pathname_component_types()
