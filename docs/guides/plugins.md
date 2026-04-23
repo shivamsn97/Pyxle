@@ -17,15 +17,37 @@ Declare plugins in `pyxle.config.json`:
 }
 ```
 
-Pyxle imports each plugin, calls its `on_startup` hook inside the ASGI lifespan, and exposes shared services to your loaders and actions:
+Pyxle imports each plugin, calls its `on_startup` hook inside the ASGI lifespan, and gives your app three ways to reach the services plugins register. Pick whichever reads best — they all resolve to the same object.
 
 ```python
+# 1. Plugin-provided helper (recommended — typed return)
+from pyxle_auth import get_auth_service
+
+@server
+async def load(request):
+    auth = get_auth_service()
+    user = await auth.resolve_session(cookie_value=request.cookies.get("pyxle_session", ""))
+    return {"user": user}
+```
+
+```python
+# 2. Generic shortcut — works for any service the registry holds
+from pyxle.plugins import plugin
+
+@server
+async def load(request):
+    auth = plugin("auth.service")
+    telemetry = plugin("telemetry.client", None)  # optional; returns None if absent
+```
+
+```python
+# 3. Long form — useful in middleware that already has the request
 @server
 async def load(request):
     auth = request.app.state.pyxle_plugins.require("auth.service")
-    user = await auth.resolve_session(...)
-    return {"user": user}
 ```
+
+All three coexist. The plugin-provided helpers (option 1) are preferred for app code because they type-annotate the return value; option 2 is there for ad-hoc access; option 3 is the fundamental mechanism.
 
 ## Config schema
 
@@ -111,7 +133,42 @@ Startup failures abort the ASGI app immediately — a plugin that can't reach it
 
 ## Consuming services from your app
 
-Inside any `@server` loader or `@action`:
+### Option 1: plugin-provided import helpers (preferred)
+
+Official plugins expose a typed helper function that reaches into the registry for you:
+
+```python
+from pyxle_db import get_database
+from pyxle_auth import get_auth_service, get_auth_settings
+
+@server
+async def load(request):
+    db = get_database()                 # -> Database
+    auth = get_auth_service()           # -> AuthService
+    settings = get_auth_settings()      # -> AuthSettings
+    ...
+```
+
+This is the closest Pyxle gets to Django's `from django.contrib.auth import authenticate` pattern. Third-party plugins should ship similar helpers — it's one extra line of code for a much nicer consumer experience.
+
+### Option 2: generic `plugin(name)` shortcut
+
+For services that don't have a typed helper (or ad-hoc access to the registry):
+
+```python
+from pyxle.plugins import plugin
+
+@server
+async def load(request):
+    auth = plugin("auth.service")
+    telemetry = plugin("telemetry.client", None)  # default avoids raising
+```
+
+`plugin(name)` raises `PluginServiceError` when the name isn't registered and no default is provided. Error messages list every registered name, so typos are obvious at first request rather than silently returning `None`.
+
+### Option 3: long form via the request
+
+Useful inside middleware that already has the `request` and wants to stay context-pure (no module-level state reads):
 
 ```python
 @server
@@ -122,15 +179,11 @@ async def load(request):
     return {"posts": [dict(r) for r in rows]}
 ```
 
-`.require(name)` raises `PluginServiceError` with the list of available service names when the key is missing — so typos are obvious at the first request instead of silently resolving to `None`.
+### When to use which
 
-For optional services, use `.get(name, default)`:
-
-```python
-telemetry = ctx.get("telemetry.client")  # None if no telemetry plugin installed
-if telemetry:
-    telemetry.record("page.load", {"route": "/posts"})
-```
+- **App loaders and actions** → option 1 (or 2 if no helper exists). Short and typed.
+- **Middleware, route hooks, request-scoped helpers** → option 3. Avoids the module-level state read, which makes the middleware easier to test in isolation.
+- **CLI scripts or tests calling plugin code outside an ASGI context** → install the context manually with `pyxle.plugins.set_active_context(ctx)` and then any of the three forms work.
 
 ## Middleware contribution
 

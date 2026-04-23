@@ -415,6 +415,75 @@ async def run_shutdown(
             )
 
 
+# ---------------------------------------------------------------------------
+# Module-level shortcut: ``plugin(name)``
+#
+# Django users reach into the registry via plain imports — they don't
+# write ``request.app.state.installed_apps.get_app_config('auth')`` on
+# every view. Pyxle mirrors that with a tiny helper the devserver
+# wires up once at lifespan startup::
+#
+#     from pyxle.plugins import plugin
+#     auth = plugin("auth.service")
+#
+# which resolves to the same :class:`PluginContext.require` call the
+# verbose ``request.app.state.pyxle_plugins.require("auth.service")``
+# form makes. For multi-app testing or libraries that want to stay
+# context-pure, :func:`set_active_context` is the supported override.
+
+_active_context: "PluginContext | None" = None
+_MISSING: Any = object()
+
+
+def set_active_context(ctx: "PluginContext | None") -> None:
+    """Install (or clear) the module-level plugin context.
+
+    Called by the devserver from inside the ASGI lifespan. Tests that
+    want a clean slate or a one-off context can call this directly —
+    pass ``None`` to clear. Kept as an explicit function (rather than
+    exposing the variable) so a future contextvar migration doesn't
+    break callers.
+    """
+    global _active_context
+    _active_context = ctx
+
+
+def active_context() -> "PluginContext":
+    """Return the active module-level plugin context.
+
+    Raises :class:`PluginServiceError` if no context has been installed.
+    In production this is only possible before ASGI startup has run;
+    in tests it's the common "I forgot to call set_active_context" case.
+    """
+    if _active_context is None:
+        raise PluginServiceError(
+            "No active plugin context. ``plugin(...)`` can only be used "
+            "from within an ASGI request (loader, action, API endpoint) "
+            "or after ``pyxle.plugins.set_active_context(ctx)`` in a test."
+        )
+    return _active_context
+
+
+def plugin(name: str, default: Any = _MISSING) -> Any:
+    """Retrieve a service registered by a plugin.
+
+    Thin sugar over ``PluginContext.require(name)`` / ``.get(name)``:
+
+        from pyxle.plugins import plugin
+
+        auth = plugin("auth.service")          # raises if missing
+        telemetry = plugin("telemetry", None)  # returns None if absent
+
+    Prefer plugin-provided helper functions (e.g. ``get_auth_service()``
+    from ``pyxle_auth``) where they exist — they type-annotate their
+    return values, which this generic helper cannot.
+    """
+    ctx = active_context()
+    if default is _MISSING:
+        return ctx.require(name)
+    return ctx.get(name, default)
+
+
 __all__ = [
     "PluginContext",
     "PluginError",
@@ -422,7 +491,10 @@ __all__ = [
     "PluginServiceError",
     "PluginSpec",
     "PyxlePlugin",
+    "active_context",
     "load_plugins",
+    "plugin",
     "run_shutdown",
     "run_startup",
+    "set_active_context",
 ]

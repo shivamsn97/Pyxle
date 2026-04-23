@@ -861,6 +861,7 @@ def create_starlette_app(
         load_plugins,
         run_shutdown,
         run_startup,
+        set_active_context,
     )
 
     _plugin_specs = tuple(
@@ -880,15 +881,22 @@ def create_starlette_app(
         # startup — the right posture for "pyxle-db can't reach the
         # database".
         await run_startup(_plugins, _plugin_ctx)
-        # Expose the shared context to request handlers. Loaders and
-        # actions access plugin services via
-        # ``request.app.state.pyxle_plugins.require("name")``.
+        # Two access paths for the resulting services:
+        #   1. ``request.app.state.pyxle_plugins.require("name")`` —
+        #      the explicit form; works in handlers that already have
+        #      the request and want to stay context-pure.
+        #   2. ``from pyxle.plugins import plugin; plugin("name")`` —
+        #      the Django-style shortcut backed by the module-level
+        #      active context we set here. Short and import-based;
+        #      preferred for most app code.
         app.state.pyxle_plugins = _plugin_ctx
+        set_active_context(_plugin_ctx)
         try:
             yield
         finally:
             # Shutdown in reverse order — best-effort; individual
             # failures are logged, not re-raised.
+            set_active_context(None)
             await run_shutdown(_plugins, _plugin_ctx)
             if pool is not None:
                 await pool.stop()

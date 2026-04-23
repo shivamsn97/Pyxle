@@ -22,9 +22,12 @@ from pyxle.plugins import (
     PluginServiceError,
     PluginSpec,
     PyxlePlugin,
+    active_context,
     load_plugins,
+    plugin,
     run_shutdown,
     run_startup,
+    set_active_context,
 )
 
 
@@ -335,3 +338,66 @@ class TestConfigIntegration:
         )
         with pytest.raises(ConfigError, match="non-empty 'name' string"):
             load_config(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# Module-level ``plugin(name)`` shortcut
+
+
+class TestActiveContextShortcut:
+    """The ``plugin(name)`` helper is the short form of
+    ``request.app.state.pyxle_plugins.require(name)``. It reads from
+    a module-level ``_active_context`` that the devserver installs at
+    lifespan startup and clears at shutdown.
+    """
+
+    def _fresh_ctx(self) -> PluginContext:
+        ctx = PluginContext()
+        ctx.register("auth.service", "<auth>")
+        ctx.register("db.database", "<db>")
+        return ctx
+
+    def test_plugin_returns_registered_service(self) -> None:
+        ctx = self._fresh_ctx()
+        set_active_context(ctx)
+        try:
+            assert plugin("auth.service") == "<auth>"
+            assert plugin("db.database") == "<db>"
+        finally:
+            set_active_context(None)
+
+    def test_plugin_with_default_returns_default_when_missing(self) -> None:
+        set_active_context(self._fresh_ctx())
+        try:
+            assert plugin("nonexistent", "fallback") == "fallback"
+            # Explicit None is also a valid default.
+            assert plugin("nonexistent", None) is None
+        finally:
+            set_active_context(None)
+
+    def test_plugin_raises_when_no_active_context(self) -> None:
+        # Ensure clean state even if a prior test left something behind.
+        set_active_context(None)
+        with pytest.raises(PluginServiceError, match="No active plugin context"):
+            plugin("anything")
+
+    def test_plugin_raises_for_missing_service_without_default(self) -> None:
+        set_active_context(self._fresh_ctx())
+        try:
+            with pytest.raises(PluginServiceError, match="not registered"):
+                plugin("nonexistent")
+        finally:
+            set_active_context(None)
+
+    def test_active_context_exposes_installed_context(self) -> None:
+        ctx = self._fresh_ctx()
+        set_active_context(ctx)
+        try:
+            assert active_context() is ctx
+        finally:
+            set_active_context(None)
+
+    def test_active_context_without_install_raises(self) -> None:
+        set_active_context(None)
+        with pytest.raises(PluginServiceError):
+            active_context()
