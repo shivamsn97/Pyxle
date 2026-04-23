@@ -4,6 +4,15 @@ Pyxle is a Python-first full-stack web framework that brings the Next.js develop
 
 **Current version:** 0.3.0 (beta)
 
+## What's new in 0.3.0
+
+- **WebSocket endpoints** — `pages/api/*.py` can export `async def websocket(ws)` for live updates, chat, log streaming. See the [API Routes guide](guides/api-routes.md#websocket-endpoints).
+- **Client navigation cache with TTL + invalidation.** Loader payloads are cached for 30s by default (tunable) so back/forward navigation is instant. Call [`invalidate(url)`](reference/client-api.md#invalidateurl) from the client or return [`invalidate_routes(response, ...)`](reference/runtime-api.md#invalidate_routesresponse-urls) from an `@action` to keep list views fresh after mutations — automatically honoured by `useAction` and `<Form>`.
+- **`ActionError` is auto-imported** for any `.pyxl` with an `@action`. No more `NameError: name 'ActionError' is not defined` on first try.
+- **`<Head>` coerces multi-part `<title>` children** into a single string, silencing React's "title element received an array" warning for the common `<title>{name} — Brand</title>` pattern.
+- **SSR worker pins `LANG=en-US.UTF-8`** by default (override with `PYXLE_SSR_LOCALE`) so `toLocaleString()` and other Intl calls stop causing hydration mismatches.
+- **Vite resolver prefers pinned versions.** `pyxle build` now runs `npm install` before falling back to `npx --yes vite`, so builds honour your `package.json` pin instead of fetching `vite@latest`.
+
 ---
 
 ## Getting Started

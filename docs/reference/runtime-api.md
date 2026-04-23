@@ -101,12 +101,12 @@ LoaderError(message: str, status_code: int = 500, data: dict | None = None)
 Exception class for structured action errors. Returns a JSON error response to the client.
 
 ```python
-from pyxle.runtime import ActionError
-
 @action
 async def update_item(request):
     raise ActionError("Validation failed", status_code=400, data={"field": "name"})
 ```
+
+> **Auto-imported since 0.3.0.** Any `.pyxl` file that declares at least one `@action` gets `from pyxle.runtime import ActionError` injected by the compiler, so `raise ActionError(...)` works without you remembering to import it. A user-defined `ActionError` class (or an existing import) is respected and takes precedence.
 
 **Constructor:**
 
@@ -127,6 +127,31 @@ ActionError(message: str, status_code: int = 400, data: dict | None = None)
 | `.message` | `str` | The error message |
 | `.status_code` | `int` | HTTP status code |
 | `.data` | `dict` | Additional data (empty dict if None was passed) |
+
+## `invalidate_routes(response, *urls)`
+
+Tell the client router to evict its cached navigation payloads for `urls` before the caller's next navigation. Used by `@action` handlers that mutate data the client has already cached elsewhere.
+
+```python
+from pyxle.runtime import invalidate_routes
+
+@action
+async def delete_post(request):
+    ...
+    # Drop the client's cached /posts so its next navigate() refetches.
+    return invalidate_routes({"ok": True}, "/posts", "/dashboard")
+```
+
+The helper accepts either a plain dict (the usual `@action` return shape) or a Starlette `Response` / `JSONResponse`. In both cases Pyxle attaches an `x-pyxle-invalidate: /posts, /dashboard` header to the outgoing response. `useAction` and `<Form>` read this header automatically and call the client-side [`invalidate(url)`](client-api.md#invalidateurl) for each listed URL — so mutation-driven cache invalidation works end-to-end with no extra wiring on the caller.
+
+Parameters:
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `response` | `dict \| Response` | The action's return value. Modified in place and returned. |
+| `*urls` | `str` | URLs to invalidate. Empty / duplicate values are filtered. |
+
+Returns the `response` argument (possibly with a header or sentinel key added) so you can `return invalidate_routes(...)` in one line.
 
 ## Document `<head>` elements
 

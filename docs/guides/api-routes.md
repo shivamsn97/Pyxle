@@ -66,6 +66,51 @@ class Users(HTTPEndpoint):
         return JSONResponse({"created": True}, status_code=201)
 ```
 
+## WebSocket endpoints
+
+Since 0.3.0, an API module can export `async def websocket(ws)` to register a WebSocket handler at the same path. The file can export both `endpoint` (HTTP) and `websocket` — they bind to the same URL and Pyxle dispatches based on the protocol of the incoming request.
+
+```python
+# pages/api/chat.py
+from starlette.websockets import WebSocket
+
+async def websocket(ws: WebSocket) -> None:
+    await ws.accept()
+    try:
+        while True:
+            message = await ws.receive_text()
+            await ws.send_text(f"echo: {message}")
+    except Exception:
+        # Client disconnected or socket closed; nothing to clean up.
+        pass
+```
+
+Client side:
+
+```jsx
+const socket = new WebSocket(`ws://${location.host}/api/chat`);
+socket.onmessage = (event) => console.log(event.data);
+socket.onopen = () => socket.send('hello');
+```
+
+You can also export a Starlette `WebSocketEndpoint` subclass for multi-method dispatch:
+
+```python
+from starlette.endpoints import WebSocketEndpoint
+
+class websocket(WebSocketEndpoint):
+    encoding = "text"
+
+    async def on_connect(self, ws): await ws.accept()
+    async def on_receive(self, ws, data): await ws.send_text(f"echo: {data}")
+    async def on_disconnect(self, ws, close_code): pass
+```
+
+Notes:
+
+- WebSocket handlers run outside the HTTP route-hooks pipeline — hooks wrap request-to-response callables and the WS lifecycle doesn't match that shape. Authenticate, rate-limit, and log inside the handler body.
+- CSRF doesn't apply to WebSocket upgrades. Enforce your own origin / session checks in `on_connect` before `await ws.accept()`.
+
 ## Dynamic API routes
 
 Use the same bracket syntax as page routes:

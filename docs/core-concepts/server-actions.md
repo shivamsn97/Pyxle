@@ -115,8 +115,6 @@ Options:
 Raise `ActionError` to return a structured error response:
 
 ```python
-from pyxle.runtime import ActionError
-
 @action
 async def delete_post(request):
     body = await request.json()
@@ -129,11 +127,32 @@ async def delete_post(request):
     return {"deleted": True}
 ```
 
+> Since 0.3.0, `ActionError` is auto-imported by the compiler for any `.pyxl` file that declares at least one `@action`. No explicit import is required. A user-defined `ActionError` class (or an existing import) is respected and takes precedence.
+
 The client receives:
 
 ```json
 { "ok": false, "error": "Not authorised" }
 ```
+
+## Invalidating client caches after a mutation
+
+Pyxle's client router caches loader payloads for 30 seconds by default so back/forward navigation is instant. A mutation that changes data the user might navigate back to should invalidate the stale route so the next visit refetches:
+
+```python
+from pyxle.runtime import invalidate_routes
+
+@action
+async def delete_post(request):
+    body = await request.json()
+    await db.delete_post(body["id"])
+    # Drop the client's cached /posts list so the next visit refetches.
+    return invalidate_routes({"ok": True}, "/posts", "/dashboard")
+```
+
+Pyxle attaches an `x-pyxle-invalidate: /posts, /dashboard` header to the response. `<Form>` and `useAction` honour the header automatically — neither the calling component nor the page component needs to know about it.
+
+For purely client-driven invalidation (no server roundtrip), use [`invalidate(url)`](../reference/client-api.md#invalidateurl) from `pyxle/client`.
 
 ## How actions are routed
 

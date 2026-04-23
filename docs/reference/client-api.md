@@ -270,3 +270,39 @@ import { refresh } from 'pyxle/client';
   Refresh data
 </button>
 ```
+
+### `invalidate(url?)`
+
+Drop a URL from the client-side navigation cache so the next `navigate(url)` refetches the loader payload instead of replaying the cached one. Call this after a mutation (create, update, delete) that affects a list view the user might navigate back to.
+
+Without an argument, clears every cached entry. Returns `true` if an entry was evicted.
+
+```jsx
+import { invalidate, navigate } from 'pyxle/client';
+
+async function handleDelete(id) {
+  await deletePost({ id });
+  invalidate('/posts');      // drop the cached /posts list
+  navigate('/posts');         // next visit refetches
+}
+```
+
+**Related: server-driven invalidation.** Your `@action` can tell the client which URLs to invalidate via the [`invalidate_routes()`](runtime-api.md#invalidate_routesresponse-urls) helper. Responses carrying an `x-pyxle-invalidate` header are honoured automatically by `useAction` and `<Form>`, so most apps never call `invalidate()` in client code directly.
+
+### Navigation cache TTL
+
+Client-side loader payloads are cached per URL for 30 seconds by default so back/forward navigation is instant while data stays reasonably fresh. Tune the cap by setting a global on the window before Pyxle's client runtime boots (e.g. in a `<Script strategy="beforeInteractive">` block):
+
+```jsx
+<Script strategy="beforeInteractive">
+  {`window.__PYXLE_NAV_STALE_MS__ = 60000;`}  {/* 60s */}
+</Script>
+```
+
+Useful values:
+
+- `0` — never cache; every navigation hits the server.
+- `30000` (default) — matches Next.js App Router's heuristic.
+- a large number — cache for the lifetime of the tab.
+
+For per-mutation control, prefer [`invalidate(url)`](#invalidateurl) or the `x-pyxle-invalidate` response header over global TTL tuning.

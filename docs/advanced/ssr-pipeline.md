@@ -136,6 +136,20 @@ This returns:
 
 The client runtime swaps the component props and updates the document head without a full page reload.
 
+## SSR worker locale
+
+Since 0.3.0 the Node SSR worker pins its locale deterministically so `toLocaleString()`, `Intl.NumberFormat`, `Intl.DateTimeFormat`, and similar APIs produce the same strings on every host. Without this, the worker inherits whatever `LANG` the process was started with — often `en_US.UTF-8` on CI, `en_GB.UTF-8` on EU servers, `C` in containers — and any server-rendered formatted date immediately mismatches what the browser produces, tripping React hydration.
+
+Default: `LANG=en-US.UTF-8`, `LC_ALL=en-US.UTF-8`. Override both via the `PYXLE_SSR_LOCALE` environment variable before Pyxle boots:
+
+```bash
+PYXLE_SSR_LOCALE=de-DE.UTF-8 pyxle serve
+```
+
+The worker only sets these if the surrounding environment hasn't already — so a systemd unit or container image that pins its own `LANG` still wins.
+
+If a page genuinely needs user-locale-aware formatting, render those pieces inside `<ClientOnly>` instead; SSR emits a placeholder and the client fills it in after mount, avoiding the mismatch entirely.
+
 ## Performance tips
 
 - **Use worker pool mode** (`--ssr-workers N`) for production. Start with N = number of CPU cores.
