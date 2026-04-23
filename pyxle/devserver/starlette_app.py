@@ -60,6 +60,40 @@ def _ensure_project_root_on_sys_path(project_root: Path) -> None:
         sys.path.insert(0, root)
 
 
+def _import_middleware_class(import_string: str) -> type:
+    """Resolve ``package.module:Attribute`` into a class.
+
+    Used by the plugin-contributed middleware path. Kept separate from
+    :mod:`pyxle.devserver.middleware` because plugins hand us
+    ``(class_import_string, options_dict)`` rather than a Middleware
+    instance, and the existing loader normalises to a Middleware
+    instance — different contract.
+    """
+    if ":" in import_string:
+        module_name, _, attribute = import_string.partition(":")
+    elif "." in import_string:
+        module_name, _, attribute = import_string.rpartition(".")
+    else:
+        raise ValueError(
+            f"Middleware spec {import_string!r} must be 'package.module:Class'"
+            " or 'package.module.Class'"
+        )
+    import importlib as _importlib  # noqa: PLC0415
+    module = _importlib.import_module(module_name)
+    try:
+        cls = getattr(module, attribute)
+    except AttributeError as exc:
+        raise AttributeError(
+            f"Module '{module_name}' has no attribute '{attribute}'"
+        ) from exc
+    if not isinstance(cls, type):
+        raise TypeError(
+            f"Middleware spec {import_string!r} resolved to non-class "
+            f"{type(cls).__name__}"
+        )
+    return cls
+
+
 class ApiRouteError(RuntimeError):
     """Raised when an API module cannot be resolved to a valid handler."""
 
@@ -816,13 +850,46 @@ def create_starlette_app(
         console_logger.error(str(exc))
         raise
 
+    # Resolve plugin specs up-front so config errors surface at boot
+    # (before the first request) instead of on-demand. Plugins are
+    # instantiated here; ``on_startup`` runs inside the lifespan so
+    # async work (DB connections, HTTP clients) happens at the right
+    # moment.
+    from pyxle.plugins import (  # noqa: PLC0415
+        PluginContext,
+        PluginSpec,
+        load_plugins,
+        run_shutdown,
+        run_startup,
+    )
+
+    _plugin_specs = tuple(
+        PluginSpec.from_config_entry(entry, source=str(settings.project_root))
+        for entry in settings.plugins
+    )
+    _plugins = load_plugins(_plugin_specs)
+    _plugin_ctx = PluginContext(settings=settings)
+
     @asynccontextmanager
     async def lifespan(app: Starlette):  # pragma: no cover - lifecycle orchestration
         if pool is not None:
             await pool.start()
+        # Startup plugins AFTER the SSR pool so plugins that need
+        # access to the pool (e.g. something that preloads pages)
+        # can see a running pool. Failures here propagate and abort
+        # startup — the right posture for "pyxle-db can't reach the
+        # database".
+        await run_startup(_plugins, _plugin_ctx)
+        # Expose the shared context to request handlers. Loaders and
+        # actions access plugin services via
+        # ``request.app.state.pyxle_plugins.require("name")``.
+        app.state.pyxle_plugins = _plugin_ctx
         try:
             yield
         finally:
+            # Shutdown in reverse order — best-effort; individual
+            # failures are logged, not re-raised.
+            await run_shutdown(_plugins, _plugin_ctx)
             if pool is not None:
                 await pool.stop()
             if vite_proxy is not None:
@@ -855,6 +922,32 @@ def create_starlette_app(
     if static_middleware is not None:
         middleware_stack.append(static_middleware)
     middleware_stack.extend(user_middleware)
+    # Plugin-contributed middleware slots in between the host app's
+    # user middleware and the Vite proxy. Each plugin can return any
+    # number of ``(import_string, options)`` pairs from ``middleware()``.
+    for _plugin in _plugins:
+        for entry in _plugin.middleware() or ():
+            try:
+                import_string, options = entry
+            except (TypeError, ValueError):
+                console_logger.warning(
+                    "Plugin '%s' returned a middleware entry that isn't "
+                    "(import_string, options); skipping: %r",
+                    _plugin.name,
+                    entry,
+                )
+                continue
+            try:
+                middleware_cls = _import_middleware_class(import_string)
+            except Exception as exc:
+                console_logger.error(
+                    "Plugin '%s' middleware '%s' could not be loaded: %s",
+                    _plugin.name,
+                    import_string,
+                    exc,
+                )
+                raise
+            middleware_stack.append(Middleware(middleware_cls, **dict(options or {})))
     if proxy_middleware is not None:
         middleware_stack.append(proxy_middleware)
 

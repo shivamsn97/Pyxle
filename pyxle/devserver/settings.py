@@ -44,6 +44,10 @@ class DevServerSettings:
     # CORS / CSRF config objects (optional, default = disabled)
     cors: Any = None
     csrf: Any = None
+    # Plugin entries from pyxle.config.json::plugins — raw payload
+    # (strings or dicts), resolved to PluginSpec/PyxlePlugin instances
+    # by the starlette app at startup. Empty tuple = no plugins.
+    plugins: tuple[Any, ...] = ()
 
     @classmethod
     def from_project_root(
@@ -67,6 +71,7 @@ class DevServerSettings:
         ssr_workers: int = 1,
         cors: Any = None,
         csrf: Any = None,
+        plugins: Sequence[Any] | None = None,
     ) -> "DevServerSettings":
         """Create settings derived from a project root directory."""
 
@@ -122,6 +127,7 @@ class DevServerSettings:
             ssr_workers=max(0, ssr_workers),
             cors=cors,
             csrf=csrf,
+            plugins=tuple(plugins) if plugins else (),
         )
 
     def to_dict(self) -> Dict[str, Any]:

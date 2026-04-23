@@ -60,6 +60,13 @@ class PyxleConfig:
     global_scripts: tuple[str, ...] = ()
     cors: CorsConfig = CorsConfig()
     csrf: CsrfConfig = CsrfConfig()
+    # Plugin entries as the raw payload from ``pyxle.config.json`` —
+    # either a bare string (``"pyxle-auth"``) or an object
+    # (``{"name": "pyxle-auth", "settings": {...}}``). Resolved into
+    # :class:`pyxle.plugins.PluginSpec` objects at devserver startup.
+    # Kept as loose primitives here so this module stays import-free
+    # and the plugin loader can live in its own place.
+    plugins: tuple[Any, ...] = ()
 
     def to_devserver_kwargs(self) -> Dict[str, Any]:
         """Return keyword arguments for :class:`pyxle.devserver.DevServerSettings`."""
@@ -78,6 +85,7 @@ class PyxleConfig:
             "api_route_hooks": self.api_route_middleware,
             "cors": self.cors,
             "csrf": self.csrf,
+            "plugins": self.plugins,
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -180,6 +188,7 @@ def _parse_config_dict(data: Dict[str, Any], *, source: Path) -> PyxleConfig:
         "styling",
         "cors",
         "csrf",
+        "plugins",
     }
     unknown_keys = set(data) - allowed_top_keys
     if unknown_keys:
@@ -210,6 +219,7 @@ def _parse_config_dict(data: Dict[str, Any], *, source: Path) -> PyxleConfig:
     global_styles, global_scripts = _parse_styling_block(data.get("styling"), source=source)
     cors_config = _parse_cors_block(data.get("cors"), source=source)
     csrf_config = _parse_csrf_block(data.get("csrf"), source=source)
+    plugins = _parse_plugins_block(data.get("plugins"), source=source)
 
     return PyxleConfig(
         pages_dir=pages_dir,
@@ -227,7 +237,46 @@ def _parse_config_dict(data: Dict[str, Any], *, source: Path) -> PyxleConfig:
         global_scripts=global_scripts,
         cors=cors_config,
         csrf=csrf_config,
+        plugins=plugins,
     )
+
+
+def _parse_plugins_block(value: Any, *, source: Path) -> tuple[Any, ...]:
+    """Parse the ``plugins`` array.
+
+    Each entry is either a bare string name or an object with at least
+    a ``name`` key. Full validation (including import-time resolution)
+    happens later in :func:`pyxle.plugins.PluginSpec.from_config_entry`
+    — here we only enforce the shape so config errors surface early.
+    """
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ConfigError(
+            f"Invalid value for 'plugins' in '{source}': expected a list."
+        )
+    entries: list[Any] = []
+    for index, entry in enumerate(value):
+        if isinstance(entry, str):
+            if not entry.strip():
+                raise ConfigError(
+                    f"Invalid 'plugins[{index}]' in '{source}': empty string."
+                )
+            entries.append(entry.strip())
+            continue
+        if isinstance(entry, Mapping):
+            if "name" not in entry or not isinstance(entry["name"], str) or not entry["name"].strip():
+                raise ConfigError(
+                    f"Invalid 'plugins[{index}]' in '{source}': object must "
+                    "include a non-empty 'name' string."
+                )
+            entries.append(dict(entry))
+            continue
+        raise ConfigError(
+            f"Invalid 'plugins[{index}]' in '{source}': expected string or object, "
+            f"got {type(entry).__name__}."
+        )
+    return tuple(entries)
 
 
 def _parse_styling_block(value: Any, *, source: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:

@@ -41,6 +41,7 @@ Practical guides for common tasks.
 - [Head Management](guides/head-management.md) -- `<Head>` component, the `HEAD` variable, and dynamic meta tags
 - [API Routes](guides/api-routes.md) -- Building JSON APIs under `pages/api/`
 - [Middleware](guides/middleware.md) -- Application-level and route-level middleware
+- [Plugins](guides/plugins.md) -- Composing apps via `pyxle.config.json::plugins` (Django-style)
 - [Environment Variables](guides/environment-variables.md) -- `.env` files, `PYXLE_PUBLIC_` prefix, and config overrides
 - [Error Handling](guides/error-handling.md) -- `LoaderError`, `ActionError`, `error.pyxl`, and `not-found.pyxl`
 - [Client Components](guides/client-components.md) -- `<Script>`, `<Image>`, `<ClientOnly>`, and `<Link>`
