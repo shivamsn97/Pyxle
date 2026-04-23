@@ -16,4 +16,4 @@ export { usePathname } from './usePathname.jsx';
 export { Form } from './Form.jsx';
 
 // Re-export Link and navigation from existing runtime
-export { Link, navigate, prefetch, refresh } from '../runtime.js';
+export { Link, navigate, prefetch, refresh, invalidate } from '../runtime.js';

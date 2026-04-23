@@ -479,7 +479,7 @@ async def _create_page_artifacts(
     head_elements = _resolve_head_elements(page, module, loader_props, debug=settings.debug)
 
     # Merge HEAD variable with JSX Head blocks and layout head blocks
-    from pyxle.devserver.registry import find_layout_head_jsx_blocks, find_layout_loaders
+    from pyxle.devserver.registry import find_layout_head_jsx_blocks
     from pyxle.ssr.head_merger import merge_head_elements
 
     layout_head_jsx_blocks = find_layout_head_jsx_blocks(settings, page.source_relative_path)

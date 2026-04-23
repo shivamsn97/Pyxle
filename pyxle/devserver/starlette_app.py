@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from starlette.applications import Starlette
 from starlette.endpoints import HTTPEndpoint
@@ -224,7 +224,7 @@ def build_api_router(
 
     for route in routes:
         module = _import_module(route.module_key, route.server_module_path, debug=True)
-        handler = _resolve_api_handler(module)
+        http_handler, ws_handler = _resolve_api_handlers(module)
         context = RouteContext(
             target="api",
             path=route.path,
@@ -234,12 +234,21 @@ def build_api_router(
             content_hash=route.content_hash,
             allowed_methods=tuple(_API_HTTP_METHODS),
         )
-        handler = wrap_with_route_hooks(handler, hooks=hooks, context=context)
 
-        if inspect.isclass(handler) and issubclass(handler, HTTPEndpoint):
-            router.add_route(route.path, handler)  # type: ignore[arg-type]
-        else:
-            router.add_route(route.path, handler, methods=list(_API_HTTP_METHODS))  # type: ignore[arg-type]
+        if http_handler is not None:
+            wrapped = wrap_with_route_hooks(http_handler, hooks=hooks, context=context)
+            if inspect.isclass(wrapped) and issubclass(wrapped, HTTPEndpoint):
+                router.add_route(route.path, wrapped)  # type: ignore[arg-type]
+            else:
+                router.add_route(route.path, wrapped, methods=list(_API_HTTP_METHODS))  # type: ignore[arg-type]
+
+        if ws_handler is not None:
+            # WebSocket routes aren't run through the HTTP route hooks —
+            # hooks wrap a request→response callable and the WS lifecycle
+            # (accept/send/recv/close) doesn't match that shape. Route
+            # hooks that need to run for WS upgrades should do so in the
+            # WS handler body.
+            router.routes.append(WebSocketRoute(route.path, ws_handler))
 
     return router
 
@@ -289,31 +298,79 @@ def _import_module(
     return module
 
 
-def _resolve_api_handler(module: ModuleType):
-    """Return the callable or endpoint class responsible for handling requests."""
+def _resolve_api_handlers(module: ModuleType) -> "tuple[Any, Any]":
+    """Return ``(http_handler, websocket_handler)`` for an API module.
+
+    An API module may export any combination of:
+
+    * ``endpoint`` — async callable or :class:`HTTPEndpoint` subclass
+      that handles HTTP requests.
+    * ``websocket`` — async callable ``(ws)`` or
+      :class:`WebSocketEndpoint` subclass that handles the WS protocol.
+    * An :class:`HTTPEndpoint` subclass somewhere in the module (picked
+      up automatically for backward compatibility with older files
+      that predate the explicit ``endpoint`` attribute).
+
+    At least one of the two must be present; otherwise the module is
+    rejected with :class:`ApiRouteError` so the developer gets a clear
+    message instead of a silent 404.
+    """
+    http_handler: Any = None
+    ws_handler: Any = None
 
     if hasattr(module, "endpoint"):
-        handler = getattr(module, "endpoint")
-        if callable(handler):
-            return handler
+        candidate = getattr(module, "endpoint")
+        if not callable(candidate):
+            raise ApiRouteError(
+                f"API module {module.__name__} exposes 'endpoint' but it is not callable"
+            )
+        http_handler = candidate
+
+    if hasattr(module, "websocket"):
+        candidate = getattr(module, "websocket")
+        if not callable(candidate):
+            raise ApiRouteError(
+                f"API module {module.__name__} exposes 'websocket' but it is not callable"
+            )
+        ws_handler = candidate
+
+    if http_handler is None and ws_handler is None:
+        # Fall back to an ``HTTPEndpoint`` subclass defined in the
+        # module. Kept for compatibility with Pyxle apps that predate
+        # the explicit ``endpoint`` attribute convention.
+        for attribute in module.__dict__.values():
+            if (
+                inspect.isclass(attribute)
+                and issubclass(attribute, HTTPEndpoint)
+                and attribute is not HTTPEndpoint
+            ):
+                http_handler = attribute
+                break
+
+    if http_handler is None and ws_handler is None:
         raise ApiRouteError(
-            f"API module {module.__name__} exposes 'endpoint' but it is not callable"
+            f"API module {module.__name__} must define an 'endpoint' callable, "
+            "a 'websocket' callable, or an HTTPEndpoint subclass"
         )
 
-    candidates = [
-        attribute
-        for attribute in module.__dict__.values()
-        if inspect.isclass(attribute)
-        and issubclass(attribute, HTTPEndpoint)
-        and attribute is not HTTPEndpoint
-    ]
+    return http_handler, ws_handler
 
-    if candidates:
-        return candidates[0]
 
-    raise ApiRouteError(
-        f"API module {module.__name__} must define an 'endpoint' callable or HTTPEndpoint subclass"
-    )
+def _resolve_api_handler(module: ModuleType):
+    """Compatibility shim for callers that only care about the HTTP half.
+
+    Older code (and the error-overlay dispatcher) hasn't been updated to
+    the split pair, but both the internal callers in this file use the
+    newer :func:`_resolve_api_handlers`. Keep this around so third-party
+    devserver plugins that reach in don't silently break.
+    """
+    http_handler, _ = _resolve_api_handlers(module)
+    if http_handler is None:
+        raise ApiRouteError(
+            f"API module {module.__name__} has only a WebSocket endpoint — "
+            "use _resolve_api_handlers() instead."
+        )
+    return http_handler
 
 
 def build_page_router(
@@ -509,7 +566,19 @@ async def _dispatch_action(
             status_code=500,
         )
 
-    return JSONResponse({"ok": True, **result})
+    # If the action used ``invalidate_routes(...)`` on a plain dict, the
+    # invalidation targets were stashed under ``__pyxle_invalidate__``.
+    # Lift them into an HTTP response header and strip the sentinel from
+    # the body before serialising.
+    invalidate_hints = result.pop("__pyxle_invalidate__", None)
+    response = JSONResponse({"ok": True, **result})
+    if invalidate_hints:
+        if isinstance(invalidate_hints, str):
+            invalidate_hints = [invalidate_hints]
+        joined = ", ".join(u for u in invalidate_hints if u)
+        if joined:
+            response.headers["x-pyxle-invalidate"] = joined
+    return response
 
 
 def _make_action_handler(route: ActionRoute, *, debug: bool = False):

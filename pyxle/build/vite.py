@@ -78,33 +78,66 @@ def run_vite_build(
 
 
 def _resolve_vite_command(project_root: Path, logger: ConsoleLogger) -> List[str]:
-    candidates: list[list[str]] = []
+    # Resolution order is deliberately biased toward the project's
+    # pinned vite version. ``npx --yes vite`` was higher in the list
+    # previously, but when ``node_modules`` is absent it fetches
+    # ``vite@latest`` instead of honouring ``package.json``'s pin —
+    # resulting in mysterious failures the moment vite's latest
+    # release has a broken transitive dep (see 2026-04-23: vite@8.0.9
+    # → rolldown@1.0.0-rc.16 which doesn't exist on npm). By trying
+    # ``npm install`` ahead of the unpinned ``npx`` fallback, deploys
+    # stay reproducible across time.
 
-    node_exec = shutil.which("node")
-    vite_js = project_root / "node_modules" / "vite" / "bin" / "vite.js"
-    if node_exec and vite_js.exists():
-        candidates.append([node_exec, str(vite_js)])
+    def _local_candidates() -> list[list[str]]:
+        out: list[list[str]] = []
+        node_exec = shutil.which("node")
+        vite_js = project_root / "node_modules" / "vite" / "bin" / "vite.js"
+        if node_exec and vite_js.exists():
+            out.append([node_exec, str(vite_js)])
 
-    npm_bin = project_root / "node_modules" / ".bin"
-    for executable in ("vite", "vite.cmd", "vite.ps1"):
-        candidate = npm_bin / executable
-        if candidate.exists():
-            candidates.append([str(candidate)])
+        npm_bin = project_root / "node_modules" / ".bin"
+        for executable in ("vite", "vite.cmd", "vite.ps1"):
+            candidate = npm_bin / executable
+            if candidate.exists():
+                out.append([str(candidate)])
+        return out
 
-    global_vite = shutil.which("vite")
-    if global_vite:
-        candidates.append([global_vite])
-
-    npx_exec = shutil.which("npx")
-    if npx_exec:
-        candidates.append([npx_exec, "--yes", "vite"])
-
-    for command in candidates:
+    # Tier 1: vite installed locally (via a prior ``npm install``).
+    for command in _local_candidates():
         if _verify_command(command, project_root):
             return command
 
+    # Tier 2: a ``package.json`` exists but no ``node_modules`` yet.
+    # Install once, then retry the local lookup before falling back to
+    # the less-reproducible global / npx paths.
+    if (project_root / "package.json").exists() and not (
+        project_root / "node_modules"
+    ).exists():
+        if _attempt_npm_install(project_root, logger):
+            for command in _local_candidates():
+                if _verify_command(command, project_root):
+                    return command
+
+    # Tier 3: a vite installed globally on PATH.
+    global_vite = shutil.which("vite")
+    if global_vite and _verify_command([global_vite], project_root):
+        return [global_vite]
+
+    # Tier 4: ``npx --yes vite`` as a last resort. This fetches
+    # ``vite@latest`` and ignores any pinned version — noisy but keeps
+    # zero-config hello-world projects buildable.
+    npx_exec = shutil.which("npx")
+    if npx_exec:
+        npx_cmd = [npx_exec, "--yes", "vite"]
+        if _verify_command(npx_cmd, project_root):
+            return npx_cmd
+
+    # Final fallback: one more ``npm install`` attempt (e.g. the
+    # install step failed the first time but might succeed now).
     if _attempt_npm_install(project_root, logger):
-        return _resolve_vite_command(project_root, logger)
+        for command in _local_candidates():
+            if _verify_command(command, project_root):
+                return command
 
     raise ViteBuildError(
         "Unable to locate a Vite executable. Install dependencies with 'npm install'."

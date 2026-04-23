@@ -22,6 +22,19 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
+// Pin the SSR worker's locale deterministically so ``toLocaleString()``,
+// ``Intl.*``, and date/number formatting render the same way on every
+// host the framework runs on. Without this, the worker inherits the
+// machine's default locale (often en-US on CI, en-GB on EU servers,
+// C on containers) and any server-rendered formatted date immediately
+// mismatches what the browser produces, tripping React hydration. Apps
+// that truly need locale-sensitive SSR can either (a) override
+// ``PYXLE_SSR_LOCALE`` in their systemd/dotenv file, or (b) wrap the
+// locale-sensitive render in ``<ClientOnly>``.
+const _pyxleSsrLocale = process.env.PYXLE_SSR_LOCALE || 'en-US.UTF-8';
+if (!process.env.LANG) process.env.LANG = _pyxleSsrLocale;
+if (!process.env.LC_ALL) process.env.LC_ALL = _pyxleSsrLocale;
+
 // Redirect all console output to stderr so it does not pollute the NDJSON protocol.
 const stderrConsole = new Console({ stdout: process.stderr, stderr: process.stderr });
 for (const method of ['log', 'info', 'warn', 'error', 'debug', 'dir', 'trace']) {

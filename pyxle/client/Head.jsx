@@ -17,7 +17,7 @@
  *
  * Multiple <Head> components compose — each one owns the nodes it rendered.
  */
-import { useEffect } from 'react';
+import React, { useEffect } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 const OWNER_ATTR = 'data-pyxle-head-client';
@@ -82,13 +82,35 @@ function _applyHeadMarkup(markup) {
 }
 
 
+function _coerceTitleChildren(children) {
+  // JSX compiles ``<title>{x} — Brand</title>`` to multiple children,
+  // which React warns about ("A title element received an array with
+  // more than 1 element"). Joining them into one text node silences
+  // the warning without changing the rendered HTML. We leave non-text
+  // children alone — ``<title>{React.createElement('span', ...)}</title>``
+  // isn't valid anyway, so the developer sees a useful React error.
+  return React.Children.map(children, (child) => {
+    if (!React.isValidElement(child)) return child;
+    if (child.type !== 'title') return child;
+    const kids = React.Children.toArray(child.props.children);
+    if (kids.length <= 1) return child;
+    if (!kids.every((k) => typeof k === 'string' || typeof k === 'number')) {
+      return child;
+    }
+    return React.cloneElement(child, {}, kids.join(''));
+  });
+}
+
+
 export function Head({ children }) {
+  const normalised = _coerceTitleChildren(children);
+
   // Server-side: register markup with the framework's head registry so
   // the template emits it into the initial HTML.
   if (typeof window === 'undefined') {
     if (typeof globalThis.__PYXLE_HEAD_REGISTRY__ !== 'undefined') {
       try {
-        const headMarkup = renderToStaticMarkup(<>{children}</>);
+        const headMarkup = renderToStaticMarkup(<>{normalised}</>);
         globalThis.__PYXLE_HEAD_REGISTRY__.register(headMarkup);
       } catch (error) {
         console.error('[Pyxle Head] SSR extraction failed:', error);
@@ -101,7 +123,7 @@ export function Head({ children }) {
   // the effect dependency (children itself changes identity every render).
   let markup = '';
   try {
-    markup = renderToStaticMarkup(<>{children}</>);
+    markup = renderToStaticMarkup(<>{normalised}</>);
   } catch (error) {
     console.error('[Pyxle Head] client render failed:', error);
   }

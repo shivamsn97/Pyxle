@@ -6,6 +6,13 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 
+// Pin the SSR worker's locale deterministically so Intl/Date formatting
+// produces the same strings the browser will produce on hydration. See
+// ssr_worker.mjs for the rationale.
+const _pyxleSsrLocale = process.env.PYXLE_SSR_LOCALE || 'en-US.UTF-8';
+if (!process.env.LANG) process.env.LANG = _pyxleSsrLocale;
+if (!process.env.LC_ALL) process.env.LC_ALL = _pyxleSsrLocale;
+
 /**
  * Verify that a resolved path stays within the given boundary directory.
  *

@@ -347,6 +347,30 @@ def _render_client_runtime_index() -> str:
               return router.refresh();
             }
 
+            // invalidate(url) — drop a specific URL from the client-side
+            // navigation cache so the next navigation to that URL refetches
+            // the loader payload instead of reusing the stored one. Use
+            // after a mutation (create/update/delete) to keep list views
+            // in sync without a full reload. Pass no argument to clear
+            // every cached URL.
+            export function invalidate(href) {
+              const router = getRouter();
+              if (!router) {
+                return false;
+              }
+              if (typeof router.invalidate !== 'function') {
+                return false;
+              }
+              if (href === undefined || href === null) {
+                return router.invalidate();
+              }
+              const url = normalizeHref(href);
+              if (!url) {
+                return false;
+              }
+              return router.invalidate(url.href);
+            }
+
             // Re-export framework primitives
             export { Script } from './script.jsx';
             export { Image } from './image.jsx';
@@ -569,11 +593,21 @@ def _render_client_runtime_index_types() -> str:
               navigate(href: NavigationTarget, options?: NavigationOptions): Promise<boolean>;
               prefetch(href: NavigationTarget): Promise<boolean>;
               refresh(): Promise<boolean>;
+              /**
+               * Evict a specific URL from the client-side navigation
+               * cache (``undefined``/no arg clears every entry). The
+               * next ``navigate`` to that URL will refetch the loader
+               * payload instead of reusing the cached one. Use after
+               * mutations (create/delete/update) so list views don't
+               * show stale data.
+               */
+              invalidate(href?: NavigationTarget): boolean;
             }
 
             export declare function navigate(href: NavigationTarget, options?: NavigationOptions): Promise<boolean>;
             export declare function prefetch(href: NavigationTarget): Promise<boolean>;
             export declare function refresh(): Promise<boolean>;
+            export declare function invalidate(href?: NavigationTarget): boolean;
             export declare function getRouter(): PyxleRouter | null;
 
             // Re-export framework primitives with types
@@ -680,7 +714,56 @@ def _render_client_entry(settings: DevServerSettings) -> str:
             let currentPagePath = window.__PYXLE_PAGE_PATH__ || '';
             let navigationController = null;
 
-            const navigationCache = new Map();
+            // ---- Navigation cache with TTL ------------------------------
+            //
+            // Every cached payload carries a ``cachedAt`` timestamp so we
+            // can treat entries older than ``navStaleMs`` as misses. This
+            // mirrors Next.js's Router Cache: cached enough to keep
+            // back/forward navigation instant, but stale-after-N so the
+            // user doesn't stare at 10-minute-old data.
+            //
+            // Default: 30s (Next 14's heuristic). Configurable via
+            // ``pyxle.config.json::navigation.staleTimeMs`` and bundled
+            // into the client via ``__PYXLE_NAV_STALE_MS__``. Pass 0 for
+            // "never cache", Infinity (or any very large number) for
+            // "cache forever".
+            const navStaleMs = (() => {
+              const configured = window.__PYXLE_NAV_STALE_MS__;
+              if (typeof configured === 'number' && configured >= 0) {
+                return configured;
+              }
+              return 30_000;
+            })();
+
+            const _navStorage = new Map();
+            const navigationCache = {
+              get(key) {
+                const entry = _navStorage.get(key);
+                if (!entry) return undefined;
+                if (navStaleMs === 0) return undefined;
+                if (Date.now() - entry.cachedAt > navStaleMs) {
+                  _navStorage.delete(key);
+                  return undefined;
+                }
+                return entry.payload;
+              },
+              set(key, payload) {
+                _navStorage.set(key, { payload, cachedAt: Date.now() });
+              },
+              has(key) {
+                return this.get(key) !== undefined;
+              },
+              delete(key) {
+                return _navStorage.delete(key);
+              },
+              clear() {
+                _navStorage.clear();
+              },
+              get size() {
+                return _navStorage.size;
+              },
+            };
+
             const navigationPromises = new Map();
             const moduleCache = new Map();
 
@@ -688,6 +771,29 @@ def _render_client_entry(settings: DevServerSettings) -> str:
               navigate: (href, options = {}) => navigateTo(href, options),
               prefetch: (href) => prefetchNavigation(href),
               refresh: () => refreshCurrentPage(),
+              // invalidate(href?) — evict a specific URL's cached nav
+              // payload. Without an argument, clears every cached URL.
+              // The next navigate(href) refetches the loader instead of
+              // serving the stale payload. Essential after mutations.
+              invalidate: (href) => {
+                if (href === undefined || href === null) {
+                  navigationCache.clear();
+                  navigationPromises.clear();
+                  failedPrefetches.clear();
+                  return true;
+                }
+                try {
+                  const target = new URL(href, window.location.origin);
+                  const key = getCacheKey(target);
+                  const removed =
+                    navigationCache.delete(key) ||
+                    navigationPromises.delete(key) ||
+                    failedPrefetches.delete(key);
+                  return removed;
+                } catch {
+                  return false;
+                }
+              },
             };
 
             window.__PYXLE_ROUTER__ = router;
@@ -2305,13 +2411,34 @@ def _render_head_component() -> str:
               return { nodes, previousTitle };
             }
 
+            // Normalise the children tree before rendering to coerce the
+            // common ``<title>{x} — Brand</title>`` pattern into a single
+            // text node. JSX compiles that to multiple children, and
+            // React then warns "A title element received an array with
+            // more than 1 element". We fix it here so every Pyxle app
+            // doesn't have to use template literals for titles.
+            function coerceTitleChildren(children) {
+              return React.Children.map(children, (child) => {
+                if (!React.isValidElement(child)) return child;
+                if (child.type !== 'title') return child;
+                const kids = React.Children.toArray(child.props.children);
+                if (kids.length <= 1) return child;
+                if (!kids.every((k) => typeof k === 'string' || typeof k === 'number')) {
+                  return child;
+                }
+                return React.cloneElement(child, {}, kids.join(''));
+              });
+            }
+
             export const Head = React.forwardRef(({ children }, ref) => {
+              const normalised = coerceTitleChildren(children);
+
               // SSR: register with the framework registry; renders nothing.
               if (typeof window === 'undefined') {
                 if (typeof globalThis.__PYXLE_HEAD_REGISTRY__ !== 'undefined') {
                   try {
                     const headMarkup = renderToStaticMarkup(
-                      React.createElement(React.Fragment, null, children)
+                      React.createElement(React.Fragment, null, normalised)
                     );
                     globalThis.__PYXLE_HEAD_REGISTRY__.register(headMarkup);
                   } catch (error) {
@@ -2326,7 +2453,7 @@ def _render_head_component() -> str:
               let markup = '';
               try {
                 markup = renderToStaticMarkup(
-                  React.createElement(React.Fragment, null, children)
+                  React.createElement(React.Fragment, null, normalised)
                 );
               } catch (error) {
                 console.error('[Pyxle Head] client render failed:', error);
@@ -2504,11 +2631,33 @@ def _render_use_action_component() -> str:
         dedent(
             """
             import { useState, useCallback, useRef } from 'react';
+            import { invalidate } from './index.js';
 
             function getCsrfToken() {
               if (typeof document === 'undefined') return '';
               const match = document.cookie.match(/(?:^|;\s*)pyxle-csrf=([^;]*)/);
               return match ? decodeURIComponent(match[1]) : '';
+            }
+
+            // Honour ``x-pyxle-invalidate: /path/a, /path/b`` on any
+            // fetch response. Each listed URL is dropped from the
+            // client nav cache so the next ``navigate()`` refetches
+            // fresh loader data. No-ops if the header is absent or
+            // malformed; errors are swallowed because this is
+            // best-effort plumbing.
+            function _applyInvalidationHeader(response) {
+              try {
+                const raw = response && response.headers
+                  ? response.headers.get('x-pyxle-invalidate')
+                  : null;
+                if (!raw) return;
+                const urls = raw.split(',').map((u) => u.trim()).filter(Boolean);
+                for (const url of urls) {
+                  try { invalidate(url); } catch { /* ignore */ }
+                }
+              } catch {
+                /* ignore */
+              }
             }
 
             function resolveActionUrl(actionName, pagePath) {
@@ -2562,6 +2711,12 @@ def _render_use_action_component() -> str:
                       signal: controller.signal,
                     });
 
+                    // Honour ``x-pyxle-invalidate`` from the server so
+                    // the action's cache invalidations take effect on
+                    // the very next ``navigate()``, without the caller
+                    // having to wire it up.
+                    _applyInvalidationHeader(response);
+
                     const json = await response.json();
 
                     if (!response.ok || json.ok === false) {
@@ -2607,11 +2762,29 @@ def _render_form_component() -> str:
         dedent(
             """
             import React, { useRef, useState, useCallback } from 'react';
+            import { invalidate } from './index.js';
 
             function getCsrfToken() {
               if (typeof document === 'undefined') return '';
               const match = document.cookie.match(/(?:^|;\s*)pyxle-csrf=([^;]*)/);
               return match ? decodeURIComponent(match[1]) : '';
+            }
+
+            // See useAction for the rationale — comma-split the header
+            // and invalidate each listed URL.
+            function _applyInvalidationHeader(response) {
+              try {
+                const raw = response && response.headers
+                  ? response.headers.get('x-pyxle-invalidate')
+                  : null;
+                if (!raw) return;
+                const urls = raw.split(',').map((u) => u.trim()).filter(Boolean);
+                for (const url of urls) {
+                  try { invalidate(url); } catch { /* ignore */ }
+                }
+              } catch {
+                /* ignore */
+              }
             }
 
             function resolveActionUrl(actionName, pagePath) {
@@ -2669,6 +2842,11 @@ def _render_form_component() -> str:
                       headers,
                       body: JSON.stringify(payload),
                     });
+
+                    // Honour ``x-pyxle-invalidate`` so the form's
+                    // submission invalidates other cached routes (e.g.
+                    // a list view) before the caller navigates.
+                    _applyInvalidationHeader(response);
 
                     const json = await response.json();
 
@@ -2808,7 +2986,7 @@ def _render_client_barrel() -> str:
             export { useAction } from './use-action.jsx';
             export { usePathname } from './use-pathname.jsx';
             export { Form } from './form.jsx';
-            export { Link, navigate, prefetch, refresh, Slot, SlotProvider, useSlot, useSlots } from './index.js';
+            export { Link, navigate, prefetch, refresh, invalidate, Slot, SlotProvider, useSlot, useSlots } from './index.js';
             """
         ).strip()
         + "\n"

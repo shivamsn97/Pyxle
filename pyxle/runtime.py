@@ -80,4 +80,74 @@ class LoaderError(Exception):
         self.data = data or {}
 
 
-__all__ = ["server", "action", "ActionError", "LoaderError"]
+_INVALIDATE_HEADER = "x-pyxle-invalidate"
+
+
+def invalidate_routes(response: Any, *urls: str) -> Any:
+    """Tell the client router to evict cached nav payloads for ``urls``.
+
+    Call from an ``@action`` handler or an API endpoint when a mutation
+    affects a route other than the one the caller is about to navigate
+    to. The response gains an ``x-pyxle-invalidate`` header with the
+    URLs comma-joined; the client's ``useAction`` / ``<Form>`` + plain
+    ``fetch`` callers can opt into reading it to drop the matching
+    navigation-cache entries before their next ``navigate()``.
+
+    Usage::
+
+        @action
+        async def delete_post(request):
+            ...
+            response = {"ok": True}
+            # Next time the user navigates to /posts, refetch:
+            return invalidate_routes(response, "/posts")
+
+    Works on any object Pyxle will serialise — including plain dicts
+    (wrapped as JSON, header set by the framework) and Starlette
+    :class:`Response` objects (header set directly). Returning the
+    response unchanged is fine when no invalidation is needed.
+    """
+    if not urls:
+        return response
+    joined = ", ".join(u for u in urls if u)
+    if not joined:
+        return response
+
+    # Case 1: a Starlette ``Response`` (or anything with ``.headers``
+    # that supports item assignment) — set the header directly.
+    headers = getattr(response, "headers", None)
+    if headers is not None:
+        try:
+            # ``MutableHeaders`` accepts ``__setitem__``; add to an
+            # existing header to preserve earlier invalidations.
+            existing = headers.get(_INVALIDATE_HEADER, "")
+            headers[_INVALIDATE_HEADER] = (
+                f"{existing}, {joined}" if existing else joined
+            )
+            return response
+        except (TypeError, AttributeError):
+            pass
+
+    # Case 2: a plain dict — stash the hint on a sentinel key. The
+    # framework's action dispatcher pulls this off before serialising
+    # and sets the HTTP header on the response. This keeps the user
+    # API the same regardless of whether they return a dict or a
+    # full Response object.
+    if isinstance(response, dict):
+        hints = response.pop("__pyxle_invalidate__", [])
+        if isinstance(hints, str):
+            hints = [hints]
+        hints = list(hints) + [u for u in urls if u]
+        response["__pyxle_invalidate__"] = hints
+        return response
+
+    return response
+
+
+__all__ = [
+    "server",
+    "action",
+    "ActionError",
+    "LoaderError",
+    "invalidate_routes",
+]

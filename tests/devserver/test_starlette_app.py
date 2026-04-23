@@ -113,6 +113,72 @@ def test_build_api_router_raises_for_invalid_module(project: DevServerSettings) 
         build_api_router([bad_route])
 
 
+def test_build_api_router_registers_websocket(project: DevServerSettings) -> None:
+    """An API module that exports ``async def websocket(ws)`` is wired
+    up as a :class:`WebSocketRoute`. Exists because previously Pyxle had
+    no user-facing WS support — every app that wanted live updates had
+    to hand-roll an ASGI middleware."""
+    write_file(
+        project.pages_dir / "api/echo.py",
+        "async def websocket(ws):\n"
+        "    await ws.accept()\n"
+        "    try:\n"
+        "        while True:\n"
+        "            msg = await ws.receive_text()\n"
+        "            await ws.send_text(f'echo:{msg}')\n"
+        "    except Exception:\n"
+        "        pass\n",
+    )
+
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    router = build_api_router(table.apis)
+    app = Starlette()
+    app.router.routes.extend(router.routes)
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/api/echo") as ws:
+            ws.send_text("hello")
+            assert ws.receive_text() == "echo:hello"
+            ws.send_text("world")
+            assert ws.receive_text() == "echo:world"
+
+
+def test_build_api_router_supports_http_and_ws_in_same_module(
+    project: DevServerSettings,
+) -> None:
+    """A module can export both ``endpoint`` and ``websocket`` to serve
+    the same path over both protocols — e.g. a REST GET alongside a
+    live-updates WS channel."""
+    write_file(
+        project.pages_dir / "api/dual.py",
+        "from starlette.responses import JSONResponse\n"
+        "\n"
+        "async def endpoint(request):\n"
+        "    return JSONResponse({'ok': True})\n"
+        "\n"
+        "async def websocket(ws):\n"
+        "    await ws.accept()\n"
+        "    await ws.send_text('ws-hello')\n"
+        "    await ws.close()\n",
+    )
+
+    build_once(project)
+    registry = load_metadata_registry(project)
+    table = build_route_table(registry)
+
+    router = build_api_router(table.apis)
+    app = Starlette()
+    app.router.routes.extend(router.routes)
+
+    with TestClient(app) as client:
+        assert client.get("/api/dual").json() == {"ok": True}
+        with client.websocket_connect("/api/dual") as ws:
+            assert ws.receive_text() == "ws-hello"
+
+
 def test_build_page_router_invokes_build_page_response(project: DevServerSettings, monkeypatch) -> None:
     build_once(project)
     registry = load_metadata_registry(project)
