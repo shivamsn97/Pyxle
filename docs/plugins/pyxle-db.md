@@ -1,5 +1,7 @@
 # pyxle-db
 
+> **Internal beta — not yet public.** `pyxle-db` is currently in internal beta and isn't published on PyPI yet. The docs below describe the API as it will ship. Public release is coming very soon.
+
 SQLite-first database plugin for Pyxle. Ships connection pooling, PRAGMA hardening, and filesystem-driven migrations with checksum tracking.
 
 - **Package**: [`pyxle-db`](https://pypi.org/project/pyxle-db/)

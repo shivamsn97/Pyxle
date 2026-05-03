@@ -1,5 +1,7 @@
 # pyxle-auth
 
+> **Internal beta — not yet public.** `pyxle-auth` is currently in internal beta and isn't published on PyPI yet. The docs below describe the API as it will ship. Public release is coming very soon.
+
 Email + password session authentication for Pyxle apps. Argon2id password hashing, `HttpOnly`/`Secure` cookies with sliding expiration, per-identifier rate limits on sign-in and sign-up.
 
 - **Package**: [`pyxle-auth`](https://pypi.org/project/pyxle-auth/)
