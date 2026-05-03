@@ -41,7 +41,8 @@ Pyxle is configured via `pyxle.config.json` in the project root. All fields are 
     "cookieSecure": false,
     "cookieSameSite": "lax",
     "exemptPaths": []
-  }
+  },
+  "plugins": []
 }
 ```
 
@@ -175,6 +176,47 @@ Route-level hooks applied to specific route types.
 | `csrf.exemptPaths` | `string[]` | `[]` | Path prefixes exempt from CSRF checks |
 
 Shorthand to disable: `"csrf": false`
+
+## Plugins
+
+### `plugins`
+
+```json
+{
+  "plugins": [
+    "pyxle-db",
+    {
+      "name": "pyxle-auth",
+      "module": "pyxle_auth.plugin",
+      "attribute": "plugin",
+      "settings": {
+        "cookieDomain": ".pyxle.app",
+        "strict": true
+      }
+    }
+  ]
+}
+```
+
+Each entry declares one plugin. Pyxle imports each plugin, calls its `on_startup` hook inside the ASGI lifespan, and exposes the services they register to loaders and actions.
+
+Entries can be either a bare string or an object:
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | `string` | *required* | User-facing plugin name. Shown in error messages and used to namespace registered services. |
+| `module` | `string` | derived from `name` | Python module containing the plugin export. Default transforms `pyxle-foo` → `pyxle_foo.plugin`. Override for non-conventional package layouts. |
+| `attribute` | `string` | `"plugin"` | Attribute on `module` that holds the `PyxlePlugin` class or instance. |
+| `settings` | `object` | `{}` | Plugin-specific configuration dict. The framework doesn't validate the shape — each plugin documents its own settings keys. |
+
+**Plugin ordering matters.** Plugins are started in the order you list them. List a plugin *before* any plugin that depends on it — e.g. `pyxle-db` before `pyxle-auth`, since auth needs a database.
+
+See the [Plugins guide](../guides/plugins.md) for authoring and consuming patterns, and [Plugins API reference](plugins-api.md) for the full API.
+
+**First-party plugins:**
+
+- [`pyxle-db`](../plugins/pyxle-db.md) — SQLite-first database with migrations
+- [`pyxle-auth`](../plugins/pyxle-auth.md) — Email+password session auth
 
 ## Environment variable overrides
 

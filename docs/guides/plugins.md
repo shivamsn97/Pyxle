@@ -78,6 +78,8 @@ The string form is sugar for `{"name": "...", "module": "..._plugin.plugin"}`. B
 
 ## Authoring a plugin
 
+### Minimum viable plugin
+
 A plugin is a regular Python package that exports a `PyxlePlugin` subclass (or instance) named `plugin`:
 
 ```python
@@ -96,7 +98,7 @@ class Plugin(PyxlePlugin):
 
     async def on_startup(self, ctx: PluginContext) -> None:
         # Register services under a short namespace so consumers can
-        # ``ctx.require("hello.service")``.
+        # ``plugin("hello.service")``.
         ctx.register("hello.service", HelloService())
 
     async def on_shutdown(self, ctx: PluginContext) -> None:
@@ -108,18 +110,162 @@ class Plugin(PyxlePlugin):
 plugin = Plugin
 ```
 
-Reading plugin settings inside the hook:
+### Ship a typed import helper
+
+Every plugin should ship a one-liner helper so consumers can import instead of reaching into the registry:
 
 ```python
+# pyxle_hello/__init__.py
+from pyxle_hello.plugin import HelloService
+
+
+def get_hello() -> HelloService:
+    """Return the active pyxle-hello service.
+
+    Requires ``pyxle-hello`` to be listed in ``pyxle.config.json::plugins``.
+    """
+    from pyxle.plugins import plugin as _plugin
+    return _plugin("hello.service")
+```
+
+Consumer code then writes `from pyxle_hello import get_hello` — typed, short, idiomatic. See the `pyxle-db` and `pyxle-auth` helpers for real-world examples.
+
+### Handling plugin settings
+
+Settings arrive as a dict from the host app's `pyxle.config.json`. The framework doesn't validate the shape — your plugin should. A simple pattern:
+
+```python
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True, slots=True)
+class HelloConfig:
+    prefix: str = "Hello"
+    shout: bool = False
+
+    @classmethod
+    def from_user_settings(cls, raw: dict) -> "HelloConfig":
+        known = {"prefix", "shout"}
+        unknown = set(raw) - known
+        if unknown:
+            raise ValueError(
+                f"pyxle-hello: unknown settings keys: {sorted(unknown)}. "
+                f"Supported: {sorted(known)}."
+            )
+        return cls(
+            prefix=str(raw.get("prefix", "Hello")),
+            shout=bool(raw.get("shout", False)),
+        )
+
+
 class Plugin(PyxlePlugin):
     name = "pyxle-hello"
 
     async def on_startup(self, ctx: PluginContext) -> None:
-        prefix = self.settings.get("greetingPrefix", "Hello")
-        ctx.register("hello.service", HelloService(prefix=prefix))
+        config = HelloConfig.from_user_settings(dict(self.settings or {}))
+        ctx.register("hello.service", HelloService(config))
 ```
 
-Settings come from the `settings` object on the config entry — the framework doesn't validate them, so the plugin is responsible for its own schema.
+The "unknown keys" check is important — a typo like `"prefxi": "Hi"` would otherwise silently fall through to the default and leave the user wondering why their setting isn't taking effect. Fail loud at startup, not at runtime.
+
+### Declaring a dependency on another plugin
+
+Plugins declare dependencies in two places:
+
+1. **In `pyproject.toml`** — so pip installs the dep alongside your plugin.
+2. **In `on_startup` at service-lookup time** — plus a clear error if the required service isn't present (which means the host app forgot to list the dependency in `plugins`, or listed them in the wrong order).
+
+```python
+from pyxle.plugins import PluginServiceError
+
+
+class Plugin(PyxlePlugin):
+    name = "pyxle-my-cache"
+
+    async def on_startup(self, ctx: PluginContext) -> None:
+        try:
+            db = ctx.require("db.database")
+        except PluginServiceError as exc:
+            raise PluginServiceError(
+                "pyxle-my-cache requires 'db.database' from pyxle-db — "
+                "list \"pyxle-db\" BEFORE \"pyxle-my-cache\" in "
+                "pyxle.config.json::plugins."
+            ) from exc
+        ctx.register("cache.store", MyCacheStore(db))
+```
+
+Phase B will introduce declarative dependencies so the framework can topo-sort plugins for you. For now, order is manual.
+
+### Environment variables
+
+Plugins that read environment variables should document the contract clearly in their README. There's no framework-level env-var declaration yet — Phase B adds `env_vars: Sequence[EnvVarSpec]` for `pyxle doctor`-style validation.
+
+### Testing a plugin
+
+The cleanest pattern mirrors the framework's own tests: drive the plugin through its real public API (`PluginSpec.from_config_entry` → `load_plugins` → `run_startup`) rather than unit-testing internals. Tests look the same whether you're writing a plugin or consuming one.
+
+```python
+# tests/test_plugin.py
+import pytest
+from pyxle.plugins import (
+    PluginContext, PluginSpec, load_plugins, run_startup, run_shutdown,
+)
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_service_is_registered_on_startup() -> None:
+    spec = PluginSpec.from_config_entry("pyxle-hello")
+    plugins = load_plugins([spec])
+    ctx = PluginContext()
+    await run_startup(plugins, ctx)
+    try:
+        svc = ctx.require("hello.service")
+        assert svc.greet("Alice") == "Hello, Alice!"
+    finally:
+        await run_shutdown(plugins, ctx)
+
+
+@pytest.mark.anyio
+async def test_import_helper_resolves_via_active_context() -> None:
+    # The module-level ``plugin(name)`` / helper path requires an
+    # installed active context. ``set_active_context`` is the public
+    # hook for tests.
+    from pyxle.plugins import set_active_context
+    from pyxle_hello import get_hello
+
+    spec = PluginSpec.from_config_entry("pyxle-hello")
+    plugins = load_plugins([spec])
+    ctx = PluginContext()
+    await run_startup(plugins, ctx)
+    set_active_context(ctx)
+    try:
+        assert get_hello() is ctx.require("hello.service")
+    finally:
+        set_active_context(None)
+        await run_shutdown(plugins, ctx)
+```
+
+### Packaging + publishing
+
+Ship your plugin as a normal Python package:
+
+```toml
+# pyproject.toml
+[project]
+name = "pyxle-hello"
+version = "0.1.0"
+dependencies = ["pyxle-framework>=0.3.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["pyxle_hello"]
+```
+
+`pip install pyxle-hello` and list `"pyxle-hello"` in a host app's `pyxle.config.json::plugins` — that's the whole distribution story. No entry points or registration dance.
 
 ## Lifecycle
 
@@ -199,7 +345,35 @@ class Plugin(PyxlePlugin):
         ]
 ```
 
-Each entry is `(import_string, options)` — the import string can be either `"package.module:Class"` or `"package.module.Class"`. Options are passed through as `Middleware(cls, **options)`, matching the shape of `pyxle.config.json::middleware`.
+Each entry is `(import_string, options)`:
+
+- **Import string** — either `"package.module:Class"` (Starlette-convention form) or `"package.module.Class"` (plain dotted form). Both resolve the same way.
+- **Options** — a dict of keyword arguments passed through as `Middleware(cls, **options)`, matching the shape of `pyxle.config.json::middleware`.
+
+### Stack position
+
+Plugin-contributed middleware sits **between** the host app's `custom_middleware` (from `pyxle.config.json::middleware`) and the Vite proxy. In order from outermost to innermost the stack looks like:
+
+```
+security headers (prod only)
+GZip (prod only)
+CORS
+CSRF
+static files
+host app custom middleware
+▶ plugin middleware (in plugin declaration order)
+Vite proxy (dev only)
+Pyxle app
+```
+
+A plugin that adds request-id middleware therefore sees requests *after* CSRF has validated them but *before* the Pyxle router dispatches, which is usually what you want. Plugins that genuinely need to run before CSRF (e.g. a plugin handling webhooks with a different validation scheme) should register an exempt path via `pyxle.config.json::csrf.exemptPaths` rather than trying to reorder middleware.
+
+### When to use middleware vs. route hooks
+
+- **Middleware** — cross-cutting request transforms (request IDs, rate-limit headers, metrics). Runs on *every* request.
+- **Route hooks** — per-route decoration (auth check on a subset of routes). Declared in `pyxle.config.json::routeMiddleware` by host apps, not plugins today.
+
+A plugin like `pyxle-auth` deliberately *doesn't* install middleware — it ships a service the host app consumes inside its own loaders. That way apps stay in control of *which* routes require auth, and the plugin doesn't gate traffic the app owner didn't opt into.
 
 ## Service naming conventions
 
@@ -222,6 +396,60 @@ Plugins should document every name they register so consumers know what to ask f
 | `on_startup` raises | `PluginError` wrapping the original — ASGI startup aborts |
 | `require()` misses | `PluginServiceError` at request time |
 
+## Troubleshooting
+
+### `PluginResolutionError: Plugin 'pyxle-foo' could not import module 'pyxle_foo.plugin'`
+
+The package isn't installed, the module path is wrong, or the plugin author forgot to create `pyxle_foo/plugin.py`.
+
+Checklist:
+1. `pip show pyxle-foo` — is the package actually installed in this interpreter?
+2. `python -c "import pyxle_foo.plugin"` — does the module import cleanly outside the devserver?
+3. If the package uses a non-standard module layout, set `module` explicitly on the config entry:
+   ```json
+   {"name": "pyxle-foo", "module": "pyxle_foo.contrib.plugin"}
+   ```
+
+### `PluginResolutionError: attribute 'plugin' is a class but doesn't subclass PyxlePlugin`
+
+The package exports a `plugin` attribute that isn't a `PyxlePlugin` subclass. Either the plugin author made a typo or you're pointing at the wrong attribute. Override `attribute` on the config entry if the plugin uses a non-standard export name:
+
+```json
+{"name": "pyxle-foo", "attribute": "FooPlugin"}
+```
+
+### `PluginServiceError: Service 'xxx' not registered. Available: ['...', '...']`
+
+The listed available names are the full registry snapshot. Common causes:
+
+- **Typo.** Compare letter-by-letter with the available list.
+- **Wrong order.** `pyxle-auth` requires `pyxle-db` before it in the config list.
+- **Plugin not installed.** The helper import succeeded but the plugin isn't in `plugins`.
+
+### Plugin startup raises `PluginError: Plugin 'foo' on_startup failed: <original>`
+
+Look at the wrapped `<original>` — that's the plugin's real failure (DB not reachable, API key invalid, schema drift, etc). Fix that; the `PluginError` layer is just framing.
+
+### `plugin(name)` raises "No active plugin context" in a test
+
+You're calling the helper outside an ASGI request. In tests, install a context manually:
+
+```python
+from pyxle.plugins import PluginContext, set_active_context
+
+ctx = PluginContext()
+ctx.register("my.service", FakeService())
+set_active_context(ctx)
+try:
+    # ... code under test that calls plugin("my.service") or a helper
+finally:
+    set_active_context(None)
+```
+
+### Changing `pyxle.config.json::plugins` doesn't take effect
+
+Pyxle resolves the plugins list at devserver startup, not per-request. Restart `pyxle dev` (or your production server) after editing the plugins list.
+
 ## Limitations (Phase A)
 
 - Plugins cannot contribute their own `.pyxl` pages yet. To ship a default sign-in page today, the plugin author provides the source string and the host app imports it — a Phase B feature will let plugins contribute a `pages_dir()` directly.
@@ -232,5 +460,9 @@ Phase B will address all three. Phase A ships now because the lifecycle + servic
 
 ## See also
 
-- [`runtime-api.md`](../reference/runtime-api.md) — `@server` / `@action` reference for consumers
-- [Middleware](middleware.md) — app-level middleware, for the `pyxle.config.json::middleware` array
+- [Plugins API reference](../reference/plugins-api.md) — full signatures for `PyxlePlugin`, `PluginContext`, `plugin(name)`, and error types.
+- [Configuration reference](../reference/configuration.md) — `pyxle.config.json::plugins` schema.
+- [pyxle-db](../plugins/pyxle-db.md) — first-party SQLite plugin.
+- [pyxle-auth](../plugins/pyxle-auth.md) — first-party auth plugin.
+- [Middleware](middleware.md) — app-level middleware, for the `pyxle.config.json::middleware` array.
+- [Runtime API](../reference/runtime-api.md) — `@server` / `@action` reference for consumers.

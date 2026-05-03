@@ -6,6 +6,9 @@ Pyxle is a Python-first full-stack web framework that brings the Next.js develop
 
 ## What's new in 0.3.0
 
+- **First-class plugin system.** Compose apps via `pyxle.config.json::plugins` (Django-style `INSTALLED_APPS`) — see the [Plugins guide](guides/plugins.md) and [Plugins API reference](reference/plugins-api.md).
+- **Django-style service access.** Resolve any plugin-registered service with `from pyxle.plugins import plugin` and `plugin("auth.service")`, or use a typed shortcut shipped by the plugin (e.g. `from pyxle_auth import get_auth_service`).
+- **First-party plugins.** Two official plugins land: [`pyxle-db`](plugins/pyxle-db.md) (SQLite-first with migrations) and [`pyxle-auth`](plugins/pyxle-auth.md) (email+password sessions, argon2id, rate limits).
 - **WebSocket endpoints** — `pages/api/*.py` can export `async def websocket(ws)` for live updates, chat, log streaming. See the [API Routes guide](guides/api-routes.md#websocket-endpoints).
 - **Client navigation cache with TTL + invalidation.** Loader payloads are cached for 30s by default (tunable) so back/forward navigation is instant. Call [`invalidate(url)`](reference/client-api.md#invalidateurl) from the client or return [`invalidate_routes(response, ...)`](reference/runtime-api.md#invalidate_routesresponse-urls) from an `@action` to keep list views fresh after mutations — automatically honoured by `useAction` and `<Form>`.
 - **`ActionError` is auto-imported** for any `.pyxl` with an `@action`. No more `NameError: name 'ActionError' is not defined` on first try.
@@ -57,6 +60,14 @@ Complete API and configuration reference.
 - [Configuration](reference/configuration.md) -- Full `pyxle.config.json` schema
 - [Runtime API](reference/runtime-api.md) -- `@server`, `@action`, `LoaderError`, `ActionError`
 - [Client API](reference/client-api.md) -- All client-side components and hooks
+- [Plugins API](reference/plugins-api.md) -- `PyxlePlugin`, `PluginContext`, `plugin(name)`
+
+## First-party plugins
+
+Official plugins maintained alongside the framework.
+
+- [pyxle-db](plugins/pyxle-db.md) -- SQLite-first database with migrations
+- [pyxle-auth](plugins/pyxle-auth.md) -- Email+password session authentication
 
 ## Architecture
 
